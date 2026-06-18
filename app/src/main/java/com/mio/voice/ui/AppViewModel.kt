@@ -16,6 +16,7 @@ import com.mio.voice.data.VoiceProfile
 import com.mio.voice.playback.PlaybackState
 import com.mio.voice.playback.PlayerController
 import com.mio.voice.provider.FakeTtsProvider
+import com.mio.voice.provider.MiniMaxTtsProvider
 import com.mio.voice.provider.TtsProvider
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -59,6 +60,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val audioCache = AudioCache(application)
     private val playerController = PlayerController(application)
     private val fakeProvider = FakeTtsProvider()
+    private val miniMaxProvider = MiniMaxTtsProvider()
     private val segmenter = TextSegmenter()
     private var generationJob: Job? = null
 
@@ -267,12 +269,30 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun previous() = playerController.previous()
     fun next() = playerController.next()
 
-    fun testConnection() {
+    fun testConnection(
+        baseUrl: String? = null,
+        endpointPath: String? = null,
+        model: String? = null,
+        defaultVoiceId: String? = null,
+        defaultSpeed: Float? = null,
+        defaultEmotion: String? = null,
+        useFakeProvider: Boolean? = null
+    ) {
         viewModelScope.launch {
             val state = _uiState.value
-            val config = state.settings.providerConfig(readApiKeyOrNull())
+            val settings = state.settings.copy(
+                baseUrl = baseUrl ?: state.settings.baseUrl,
+                endpointPath = endpointPath ?: state.settings.endpointPath,
+                model = model ?: state.settings.model,
+                defaultVoiceId = defaultVoiceId ?: state.settings.defaultVoiceId,
+                defaultSpeed = defaultSpeed ?: state.settings.defaultSpeed,
+                defaultEmotion = defaultEmotion ?: state.settings.defaultEmotion,
+                useFakeProvider = useFakeProvider ?: state.settings.useFakeProvider
+            )
+            val apiKey = state.apiKeyInput.takeIf { it.isNotBlank() } ?: readApiKeyOrNull()
+            val config = settings.providerConfig(apiKey)
             try {
-                val result = providerFor(state.settings).testConnection(config)
+                val result = providerFor(settings).testConnection(config)
                 val file = audioCache.writeTemporary("test_connection", result.audioBytes, result.audioFormat)
                 playerController.playFile(file)
                 _uiState.update { it.copy(statusMessage = "Connection test generated audio and started playback.") }
@@ -375,10 +395,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun providerFor(settings: AppSettings): TtsProvider {
-        if (!settings.useFakeProvider) {
-            error("MiniMax provider is not integrated in Stage A yet.")
-        }
-        return fakeProvider
+        return if (settings.useFakeProvider) fakeProvider else miniMaxProvider
     }
 
     private suspend fun readApiKeyOrNull(): String? =

@@ -30,12 +30,12 @@ import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.Checkbox
-import androidx.compose.material3.Divider
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ElevatedButton
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -305,7 +305,19 @@ private fun SettingsScreen(state: AppUiState, viewModel: AppViewModel) {
                 Spacer(Modifier.width(8.dp))
                 Text("Save")
             }
-            ElevatedButton(onClick = viewModel::testConnection) {
+            ElevatedButton(
+                onClick = {
+                    viewModel.testConnection(
+                        baseUrl = baseUrl,
+                        endpointPath = endpoint,
+                        model = model,
+                        defaultVoiceId = defaultVoiceId,
+                        defaultSpeed = defaultSpeed,
+                        defaultEmotion = defaultEmotion,
+                        useFakeProvider = useFakeProvider
+                    )
+                }
+            ) {
                 Icon(Icons.Default.PlayArrow, contentDescription = null)
                 Spacer(Modifier.width(8.dp))
                 Text("Test")
@@ -313,7 +325,7 @@ private fun SettingsScreen(state: AppUiState, viewModel: AppViewModel) {
             OutlinedButton(onClick = viewModel::clearCredentials) { Text("Clear credentials") }
             OutlinedButton(onClick = viewModel::clearAudioCache) { Text("Clear cache") }
         }
-        Divider()
+        HorizontalDivider()
         VoiceManager(state, viewModel)
     }
 }
