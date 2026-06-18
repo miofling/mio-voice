@@ -12,6 +12,7 @@ data class GenerationFingerprint(
     val model: String,
     val speed: Float,
     val emotion: String?,
+    val pitch: Int,
     val audioFormat: String,
     val extraParams: Map<String, String>,
     val cacheVersion: Int = 1
@@ -33,6 +34,7 @@ data class GenerationFingerprint(
         appendField("model", model)
         appendField("speed", speed.toString())
         appendField("emotion", emotion.orEmpty())
+        appendField("pitch", pitch.toString())
         appendField("audioFormat", audioFormat)
         extraParams.toSortedMap().forEach { (key, value) ->
             appendField("extra:$key", value)
@@ -57,6 +59,7 @@ data class GenerationFingerprint(
                 model = request.model,
                 speed = request.speed,
                 emotion = request.emotion,
+                pitch = request.pitch,
                 audioFormat = request.audioFormat,
                 extraParams = request.extraParams
             )

@@ -5,7 +5,27 @@ import java.io.File
 data class VoiceProfile(
     val id: String,
     val displayName: String,
-    val voiceId: String
+    val voiceId: String,
+    val defaultPresetId: String,
+    val presets: List<EmotionPreset>
+)
+
+data class EmotionPreset(
+    val id: String,
+    val label: String,
+    val emotion: String,
+    val speed: Float,
+    val pitch: Int,
+    val previewText: String = ""
+)
+
+data class ResolvedVoiceSettings(
+    val voiceProfileId: String,
+    val presetId: String,
+    val voiceId: String,
+    val emotion: String,
+    val speed: Float,
+    val pitch: Int
 )
 
 data class ProviderConfig(
@@ -16,7 +36,8 @@ data class ProviderConfig(
     val defaultVoiceId: String = "",
     val defaultSpeed: Float = 1.0f,
     val defaultEmotion: String? = null,
-    val audioFormat: String = "mp3"
+    val audioFormat: String = "mp3",
+    val maxCharsPerRequest: Int = 2_000
 )
 
 data class TtsRequest(
@@ -27,6 +48,7 @@ data class TtsRequest(
     val model: String,
     val speed: Float,
     val emotion: String?,
+    val pitch: Int = 0,
     val audioFormat: String = "mp3",
     val extraParams: Map<String, String> = emptyMap()
 )

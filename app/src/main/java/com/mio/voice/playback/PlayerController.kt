@@ -83,7 +83,7 @@ class PlayerController(context: Context) {
         player.setMediaItem(MediaItem.fromUri(Uri.fromFile(file)))
         player.prepare()
         player.play()
-        activeSegments = listOf(QueueSegment("test", "Connection test", file, com.mio.voice.data.SegmentStatus.Ready))
+        activeSegments = listOf(QueueSegment("test", "连接测试", file, com.mio.voice.data.SegmentStatus.Ready))
         updateState()
     }
 

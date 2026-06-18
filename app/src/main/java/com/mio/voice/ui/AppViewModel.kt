@@ -4,14 +4,17 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.mio.voice.cache.AudioCache
-import com.mio.voice.core.TextSegmenter
+import com.mio.voice.core.TechnicalTextChunker
 import com.mio.voice.data.AppSettings
 import com.mio.voice.data.AppSettingsStore
 import com.mio.voice.data.CredentialReadResult
+import com.mio.voice.data.EmotionPreset
 import com.mio.voice.data.QueueSegment
+import com.mio.voice.data.ResolvedVoiceSettings
 import com.mio.voice.data.SegmentStatus
 import com.mio.voice.data.SecureCredentialStore
 import com.mio.voice.data.TtsRequest
+import com.mio.voice.data.VoiceLibrary
 import com.mio.voice.data.VoiceProfile
 import com.mio.voice.playback.PlaybackState
 import com.mio.voice.playback.PlayerController
@@ -28,6 +31,17 @@ import java.util.UUID
 
 enum class HomeMode { Text, Words }
 
+private val TTS_MODEL_PRESETS = listOf(
+    "speech-2.8-hd",
+    "speech-2.8-turbo",
+    "speech-2.6-hd",
+    "speech-2.6-turbo",
+    "speech-02-hd",
+    "speech-02-turbo",
+    "speech-01-hd",
+    "speech-01-turbo"
+)
+
 data class AppUiState(
     val settings: AppSettings = AppSettings(),
     val apiKeyInput: String = "",
@@ -39,10 +53,8 @@ data class AppUiState(
     val repeatPauseMs: Int = 400,
     val wordPauseMs: Int = 900,
     val selectedVoiceProfileId: String? = null,
-    val manualVoiceId: String = "",
+    val selectedPresetId: String? = null,
     val modelInput: String = "",
-    val speed: Float = 1.0f,
-    val emotion: String? = null,
     val segments: List<QueueSegment> = emptyList(),
     val isGenerating: Boolean = false,
     val generatedCount: Int = 0,
@@ -51,7 +63,15 @@ data class AppUiState(
     val playback: PlaybackState = PlaybackState(),
     val voiceNameDraft: String = "",
     val voiceIdDraft: String = "",
-    val editingVoiceId: String? = null
+    val editingVoiceId: String? = null,
+    val presetLabelDraft: String = "",
+    val presetEmotionDraft: String = "neutral",
+    val presetSpeedDraft: Float = 1.0f,
+    val presetPitchDraft: Int = 0,
+    val presetPreviewTextDraft: String = "",
+    val editingPresetId: String? = null,
+    val fetchedModels: List<String> = TTS_MODEL_PRESETS,
+    val isFetchingModels: Boolean = false
 )
 
 class AppViewModel(application: Application) : AndroidViewModel(application) {
@@ -61,7 +81,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val playerController = PlayerController(application)
     private val fakeProvider = FakeTtsProvider()
     private val miniMaxProvider = MiniMaxTtsProvider()
-    private val segmenter = TextSegmenter()
     private var generationJob: Job? = null
 
     private val _uiState = MutableStateFlow(AppUiState())
@@ -71,13 +90,17 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             settingsStore.settings.collect { settings ->
                 _uiState.update { state ->
+                    val selectedVoiceId = state.selectedVoiceProfileId
+                        ?: settings.defaultVoiceProfileId
+                        ?: settings.voices.firstOrNull()?.id
+                    val selectedVoice = settings.voices.firstOrNull { it.id == selectedVoiceId }
                     state.copy(
                         settings = settings,
-                        selectedVoiceProfileId = state.selectedVoiceProfileId ?: settings.defaultVoiceProfileId,
-                        manualVoiceId = state.manualVoiceId.ifBlank { settings.defaultVoiceId },
-                        modelInput = state.modelInput.ifBlank { settings.model },
-                        speed = if (state.speed == 1.0f) settings.defaultSpeed else state.speed,
-                        emotion = state.emotion ?: settings.defaultEmotion
+                        selectedVoiceProfileId = selectedVoiceId,
+                        selectedPresetId = state.selectedPresetId
+                            ?: selectedVoice?.defaultPresetId
+                            ?: selectedVoice?.presets?.firstOrNull()?.id,
+                        modelInput = state.modelInput.ifBlank { settings.model }
                     )
                 }
             }
@@ -99,11 +122,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun updateText(value: String) = _uiState.update { it.copy(textInput = value) }
     fun updateWordInput(value: String) = _uiState.update { it.copy(wordInput = value) }
-    fun updateMode(mode: HomeMode) = _uiState.update { it.copy(homeMode = mode) }
-    fun updateManualVoiceId(value: String) = _uiState.update { it.copy(manualVoiceId = value) }
+    fun updateMode(mode: HomeMode) = _uiState.update {
+        it.copy(
+            homeMode = mode,
+            segments = emptyList(),
+            generatedCount = 0,
+            totalCount = 0,
+            statusMessage = null
+        )
+    }
     fun updateModel(value: String) = _uiState.update { it.copy(modelInput = value) }
-    fun updateSpeed(value: Float) = _uiState.update { it.copy(speed = value) }
-    fun updateEmotion(value: String?) = _uiState.update { it.copy(emotion = value) }
     fun updateRepeatCount(value: Int) = _uiState.update { it.copy(repeatCount = value.coerceIn(1, 5)) }
     fun updateRepeatPause(value: Int) = _uiState.update { it.copy(repeatPauseMs = value.coerceIn(0, 5_000)) }
     fun updateWordPause(value: Int) = _uiState.update { it.copy(wordPauseMs = value.coerceIn(0, 10_000)) }
@@ -111,7 +139,20 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun updateVoiceDraft(name: String, voiceId: String) = _uiState.update { it.copy(voiceNameDraft = name, voiceIdDraft = voiceId) }
     fun selectVoice(profileId: String?) = _uiState.update { state ->
         val profile = state.settings.voices.firstOrNull { it.id == profileId }
-        state.copy(selectedVoiceProfileId = profileId, manualVoiceId = profile?.voiceId ?: state.manualVoiceId)
+        state.copy(
+            selectedVoiceProfileId = profileId,
+            selectedPresetId = profile?.defaultPresetId ?: profile?.presets?.firstOrNull()?.id
+        )
+    }
+    fun selectPreset(presetId: String?) = _uiState.update { it.copy(selectedPresetId = presetId) }
+    fun updatePresetDraft(label: String, emotion: String, speed: Float, pitch: Int, previewText: String) = _uiState.update {
+        it.copy(
+            presetLabelDraft = label,
+            presetEmotionDraft = emotion,
+            presetSpeedDraft = speed.coerceIn(0.5f, 2.0f),
+            presetPitchDraft = pitch.coerceIn(-12, 12),
+            presetPreviewTextDraft = previewText
+        )
     }
 
     fun saveSettings(
@@ -121,6 +162,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         defaultVoiceId: String,
         defaultSpeed: Float,
         defaultEmotion: String?,
+        maxCharsPerRequest: Int,
         useFakeProvider: Boolean
     ) {
         viewModelScope.launch {
@@ -133,12 +175,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     defaultVoiceId = defaultVoiceId,
                     defaultSpeed = defaultSpeed,
                     defaultEmotion = defaultEmotion,
+                    maxCharsPerRequest = maxCharsPerRequest.coerceIn(200, 20_000),
                     useFakeProvider = useFakeProvider
                 )
             )
             val apiKey = _uiState.value.apiKeyInput
             if (apiKey.isNotBlank()) credentialStore.saveApiKey(apiKey)
-            _uiState.update { it.copy(statusMessage = "Settings saved.", apiKeyInput = "") }
+            _uiState.update { it.copy(statusMessage = "设置已保存。", apiKeyInput = "") }
         }
     }
 
@@ -156,22 +199,133 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val state = _uiState.value
             if (state.voiceIdDraft.isBlank()) {
-                _uiState.update { it.copy(statusMessage = "voice_id is required.") }
+                _uiState.update { it.copy(statusMessage = "请先填写 voice_id。") }
                 return@launch
             }
             val profile = VoiceProfile(
                 id = state.editingVoiceId ?: UUID.randomUUID().toString(),
                 displayName = state.voiceNameDraft.ifBlank { state.voiceIdDraft },
-                voiceId = state.voiceIdDraft
-            )
+                voiceId = state.voiceIdDraft,
+                defaultPresetId = state.settings.voices.firstOrNull { it.id == state.editingVoiceId }?.defaultPresetId.orEmpty(),
+                presets = state.settings.voices.firstOrNull { it.id == state.editingVoiceId }?.presets.orEmpty()
+            ).let {
+                if (state.editingVoiceId == null) {
+                    VoiceLibrary.createVoice(
+                        id = it.id,
+                        displayName = it.displayName,
+                        voiceId = it.voiceId,
+                        defaultEmotion = state.settings.defaultEmotion,
+                        defaultSpeed = state.settings.defaultSpeed
+                    )
+                } else {
+                    VoiceLibrary.normalizeVoice(it, state.settings.defaultEmotion, state.settings.defaultSpeed)
+                }
+            }
             settingsStore.upsertVoice(profile, makeDefault)
             _uiState.update {
                 it.copy(
                     editingVoiceId = null,
                     voiceNameDraft = "",
                     voiceIdDraft = "",
-                    statusMessage = "Voice saved."
+                    statusMessage = "音色已保存。"
                 )
+            }
+        }
+    }
+
+    fun startEditPreset(preset: EmotionPreset) {
+        _uiState.update {
+            it.copy(
+                editingPresetId = preset.id,
+                presetLabelDraft = preset.label,
+                presetEmotionDraft = preset.emotion,
+                presetSpeedDraft = preset.speed,
+                presetPitchDraft = preset.pitch,
+                presetPreviewTextDraft = preset.previewText
+            )
+        }
+    }
+
+    fun savePreset(voiceProfileId: String, makeDefault: Boolean) {
+        viewModelScope.launch {
+            val state = _uiState.value
+            val voices = state.settings.voices.toMutableList()
+            val index = voices.indexOfFirst { it.id == voiceProfileId }
+            if (index < 0) return@launch
+            val preset = EmotionPreset(
+                id = state.editingPresetId ?: UUID.randomUUID().toString(),
+                label = state.presetLabelDraft.ifBlank { "默认" },
+                emotion = state.presetEmotionDraft,
+                speed = state.presetSpeedDraft,
+                pitch = state.presetPitchDraft,
+                previewText = state.presetPreviewTextDraft
+            )
+            voices[index] = VoiceLibrary.upsertPreset(voices[index], preset, makeDefault)
+            settingsStore.save(state.settings.copy(voices = voices))
+            _uiState.update {
+                it.copy(
+                    editingPresetId = null,
+                    presetLabelDraft = "",
+                    presetEmotionDraft = "neutral",
+                    presetSpeedDraft = 1.0f,
+                    presetPitchDraft = 0,
+                    presetPreviewTextDraft = "",
+                    selectedPresetId = if (makeDefault) preset.id else it.selectedPresetId,
+                    statusMessage = "预设已保存。"
+                )
+            }
+        }
+    }
+
+    fun deletePreset(voiceProfileId: String, presetId: String) {
+        viewModelScope.launch {
+            val state = _uiState.value
+            val voices = state.settings.voices.toMutableList()
+            val index = voices.indexOfFirst { it.id == voiceProfileId }
+            if (index < 0) return@launch
+            val result = VoiceLibrary.deletePreset(voices[index], presetId)
+            voices[index] = result.voice
+            if (result.deleted) {
+                settingsStore.save(state.settings.copy(voices = voices))
+            }
+            _uiState.update { it.copy(statusMessage = result.message ?: "预设已删除。") }
+        }
+    }
+
+    fun setDefaultPreset(voiceProfileId: String, presetId: String) {
+        viewModelScope.launch {
+            val state = _uiState.value
+            val voices = state.settings.voices.toMutableList()
+            val index = voices.indexOfFirst { it.id == voiceProfileId }
+            if (index < 0) return@launch
+            voices[index] = VoiceLibrary.setDefaultPreset(voices[index], presetId)
+            settingsStore.save(state.settings.copy(voices = voices))
+            _uiState.update { it.copy(selectedPresetId = presetId, statusMessage = "默认预设已更新。") }
+        }
+    }
+
+    fun previewPreset(voiceProfileId: String, presetId: String?) {
+        viewModelScope.launch {
+            val state = _uiState.value
+            val resolved = resolvePreset(voiceProfileId, presetId)
+            if (resolved == null) {
+                _uiState.update { it.copy(statusMessage = "请先选择音色和预设。") }
+                return@launch
+            }
+            val text = state.settings.voices
+                .firstOrNull { it.id == voiceProfileId }
+                ?.presets
+                ?.firstOrNull { it.id == resolved.presetId }
+                ?.previewText
+                ?.takeIf { it.isNotBlank() }
+                ?: "Mio Voice 预设试听。"
+            try {
+                val request = buildRequest(text, state, resolved)
+                val file = audioCache.getOrGenerate(request, providerFor(state.settings))
+                playerController.playFile(file)
+                _uiState.update { it.copy(statusMessage = "预设试听已开始播放。") }
+            } catch (error: Exception) {
+                _uiState.update { it.copy(statusMessage = sanitize(error)) }
             }
         }
     }
@@ -179,21 +333,21 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun deleteVoice(id: String) {
         viewModelScope.launch {
             settingsStore.deleteVoice(id)
-            _uiState.update { it.copy(statusMessage = "Voice deleted.") }
+            _uiState.update { it.copy(statusMessage = "音色已删除。") }
         }
     }
 
     fun clearCredentials() {
         viewModelScope.launch {
             credentialStore.clear()
-            _uiState.update { it.copy(apiKeyInput = "", statusMessage = "Credentials cleared.") }
+            _uiState.update { it.copy(apiKeyInput = "", statusMessage = "凭证已清除。") }
         }
     }
 
     fun clearAudioCache() {
         viewModelScope.launch {
             audioCache.clear()
-            _uiState.update { it.copy(statusMessage = "Audio cache cleared.") }
+            _uiState.update { it.copy(statusMessage = "音频缓存已清理。") }
         }
     }
 
@@ -201,13 +355,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         generationJob?.cancel()
         generationJob = viewModelScope.launch {
             val state = _uiState.value
-            val items = if (state.homeMode == HomeMode.Text) {
-                segmenter.split(state.textInput)
-            } else {
-                state.wordInput.lines().map { it.trim() }.filter { it.isNotEmpty() }
+            if (state.homeMode == HomeMode.Text) {
+                generatePlainText(state)
+                return@launch
             }
+            val items = state.wordInput.lines().map { it.trim() }.filter { it.isNotEmpty() }
             if (items.isEmpty()) {
-                _uiState.update { it.copy(statusMessage = "Enter text first.") }
+                _uiState.update { it.copy(statusMessage = "请先输入文本。") }
                 return@launch
             }
             _uiState.update {
@@ -222,16 +376,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 )
             }
             try {
-                val queue = if (state.homeMode == HomeMode.Text) {
-                    generateTextSegments(items)
-                } else {
-                    generateWordSegments(items, state.repeatCount, state.repeatPauseMs, state.wordPauseMs)
-                }
+                val queue = generateWordSegments(items, state.repeatCount, state.repeatPauseMs, state.wordPauseMs)
                 _uiState.update {
                     it.copy(
                         isGenerating = false,
                         segments = queue,
-                        statusMessage = "Generated ${queue.count { segment -> segment.status == SegmentStatus.Ready }} playable items."
+                        statusMessage = "已生成 ${queue.count { segment -> segment.status == SegmentStatus.Ready }} 个可播放片段。"
                     )
                 }
                 playerController.setQueue(queue.filter { it.status == SegmentStatus.Ready })
@@ -243,6 +393,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun retrySegment(segmentId: String) {
         viewModelScope.launch {
+            if (_uiState.value.homeMode == HomeMode.Text && segmentId == TEXT_TASK_ID) {
+                generate()
+                return@launch
+            }
             val state = _uiState.value
             val segment = state.segments.firstOrNull { it.id == segmentId } ?: return@launch
             val request = segment.request ?: buildRequest(segment.text, state)
@@ -261,7 +415,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         generationJob?.cancel()
         generationJob = null
         playerController.stop()
-        _uiState.update { it.copy(isGenerating = false, statusMessage = "Stopped.") }
+        _uiState.update { it.copy(isGenerating = false, statusMessage = "已停止。") }
     }
 
     fun play() = playerController.play()
@@ -295,9 +449,44 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 val result = providerFor(settings).testConnection(config)
                 val file = audioCache.writeTemporary("test_connection", result.audioBytes, result.audioFormat)
                 playerController.playFile(file)
-                _uiState.update { it.copy(statusMessage = "Connection test generated audio and started playback.") }
+                _uiState.update { it.copy(statusMessage = "测试连接已生成短语音并开始试听。") }
             } catch (error: Exception) {
                 _uiState.update { it.copy(statusMessage = sanitize(error)) }
+            }
+        }
+    }
+
+    fun fetchModels(
+        baseUrl: String? = null,
+        apiKey: String? = null
+    ) {
+        viewModelScope.launch {
+            val state = _uiState.value
+            val settings = state.settings.copy(baseUrl = baseUrl ?: state.settings.baseUrl)
+            val effectiveApiKey = apiKey?.takeIf { it.isNotBlank() }
+                ?: state.apiKeyInput.takeIf { it.isNotBlank() }
+                ?: readApiKeyOrNull()
+            val config = settings.providerConfig(effectiveApiKey)
+            _uiState.update { it.copy(isFetchingModels = true, statusMessage = "正在拉取模型列表...") }
+            try {
+                val fetched = miniMaxProvider.fetchModels(config)
+                val models = (TTS_MODEL_PRESETS + fetched).distinct()
+                _uiState.update {
+                    it.copy(
+                        isFetchingModels = false,
+                        fetchedModels = models,
+                        modelInput = it.modelInput.ifBlank { models.firstOrNull().orEmpty() },
+                        statusMessage = "已拉取 ${fetched.size} 个模型。"
+                    )
+                }
+            } catch (error: Exception) {
+                _uiState.update {
+                    it.copy(
+                        isFetchingModels = false,
+                        fetchedModels = TTS_MODEL_PRESETS,
+                        statusMessage = "${sanitize(error)} 已保留官方 TTS 预设，可继续手动填写模型名。"
+                    )
+                }
             }
         }
     }
@@ -307,25 +496,64 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         super.onCleared()
     }
 
-    private suspend fun generateTextSegments(items: List<String>): List<QueueSegment> {
-        val generated = mutableListOf<QueueSegment>()
-        items.forEachIndexed { index, text ->
-            val id = index.toString()
-            val request = buildRequest(text, _uiState.value)
-            updateSegment(id) { it.copy(status = SegmentStatus.Generating, request = request) }
+    private suspend fun generatePlainText(state: AppUiState) {
+        val text = state.textInput
+        if (text.isBlank()) {
+            _uiState.update { it.copy(statusMessage = "请先输入文本。") }
+            return
+        }
+        val chunks = TechnicalTextChunker(state.settings.maxCharsPerRequest.coerceAtLeast(200)).split(text)
+        _uiState.update {
+            it.copy(
+                isGenerating = true,
+                generatedCount = 0,
+                totalCount = 1,
+                segments = listOf(QueueSegment(TEXT_TASK_ID, text, null, SegmentStatus.Generating)),
+                statusMessage = null
+            )
+        }
+
+        val queue = mutableListOf<QueueSegment>()
+        var firstError: String? = null
+        chunks.forEachIndexed { index, chunk ->
+            val request = buildRequest(chunk, _uiState.value)
             try {
                 val file = audioCache.getOrGenerate(request, providerFor(_uiState.value.settings))
-                val ready = QueueSegment(id, text, file, SegmentStatus.Ready, request = request)
-                generated += ready
-                updateSegment(id) { ready }
-                _uiState.update { it.copy(generatedCount = it.generatedCount + 1) }
+                queue += QueueSegment("text-tech-$index", "全文", file, SegmentStatus.Ready, request = request)
             } catch (error: Exception) {
-                val failed = QueueSegment(id, text, null, SegmentStatus.Failed, sanitize(error), request)
-                generated += failed
-                updateSegment(id) { failed }
+                firstError = firstError ?: sanitize(error)
+                queue += QueueSegment("text-tech-$index", "全文", null, SegmentStatus.Failed, firstError, request)
             }
         }
-        return generated
+        val readyQueue = queue.filter { it.status == SegmentStatus.Ready }
+        val status = if (firstError == null) SegmentStatus.Ready else SegmentStatus.Failed
+        _uiState.update {
+            it.copy(
+                isGenerating = false,
+                generatedCount = if (firstError == null) 1 else 0,
+                totalCount = 1,
+                segments = listOf(
+                    QueueSegment(
+                        id = TEXT_TASK_ID,
+                        text = text,
+                        audioFile = readyQueue.firstOrNull()?.audioFile,
+                        status = status,
+                        errorMessage = firstError
+                    )
+                ),
+                statusMessage = if (firstError == null) {
+                    if (chunks.size == 1) "全文已生成。"
+                    else "全文已生成，后台使用 ${chunks.size} 个技术分块。"
+                } else {
+                    firstError
+                }
+            )
+        }
+        if (firstError == null) {
+            playerController.setQueue(readyQueue)
+        } else {
+            playerController.setQueue(emptyList())
+        }
     }
 
     private suspend fun generateWordSegments(
@@ -356,7 +584,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     if (repeatIndex < repeatCount - 1 && repeatPauseMs > 0) {
                         queue += QueueSegment(
                             id = "$wordIndex-$repeatIndex-repeat-pause",
-                            text = "Pause",
+                            text = "停顿",
                             audioFile = audioCache.silence(repeatPauseMs),
                             status = SegmentStatus.Ready
                         )
@@ -365,7 +593,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 if (wordPauseMs > 0) {
                     queue += QueueSegment(
                         id = "$wordIndex-word-pause",
-                        text = "Pause",
+                        text = "停顿",
                         audioFile = audioCache.silence(wordPauseMs),
                         status = SegmentStatus.Ready
                     )
@@ -377,19 +605,35 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         return queue
     }
 
-    private suspend fun buildRequest(text: String, state: AppUiState): TtsRequest {
+    fun getAvailablePresets(voiceProfileId: String): List<EmotionPreset> =
+        VoiceLibrary.getAvailablePresets(_uiState.value.settings.voices, voiceProfileId)
+
+    fun resolvePreset(voiceProfileId: String, presetId: String?): ResolvedVoiceSettings? =
+        VoiceLibrary.resolvePreset(_uiState.value.settings.voices, voiceProfileId, presetId)
+
+    private suspend fun buildRequest(
+        text: String,
+        state: AppUiState,
+        resolvedOverride: ResolvedVoiceSettings? = null
+    ): TtsRequest {
         val apiKey = readApiKeyOrNull()
         val config = state.settings.providerConfig(apiKey)
-        val selectedVoice = state.settings.voices.firstOrNull { it.id == state.selectedVoiceProfileId }
-        val voiceId = selectedVoice?.voiceId ?: state.manualVoiceId.ifBlank { state.settings.defaultVoiceId }
+        val voiceProfileId = state.selectedVoiceProfileId
+            ?: state.settings.defaultVoiceProfileId
+            ?: state.settings.voices.firstOrNull()?.id
+            ?: error("请先在音色库添加父音色。")
+        val resolved = resolvedOverride
+            ?: VoiceLibrary.resolvePreset(state.settings.voices, voiceProfileId, state.selectedPresetId)
+            ?: error("请先选择可用的音色预设。")
         return TtsRequest(
             providerProfileId = if (state.settings.useFakeProvider) "fake" else "minimax",
             config = config,
             text = text,
-            voiceId = voiceId,
+            voiceId = resolved.voiceId,
             model = state.modelInput.ifBlank { state.settings.model },
-            speed = state.speed,
-            emotion = state.emotion,
+            speed = resolved.speed,
+            emotion = resolved.emotion,
+            pitch = resolved.pitch,
             audioFormat = "wav"
         )
     }
@@ -414,5 +658,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         error.message
             ?.replace(Regex("Bearer\\s+[^\\s]+", RegexOption.IGNORE_CASE), "Bearer ***")
             ?.replace(Regex("sk-[A-Za-z0-9_-]+"), "sk-***")
-            ?: "Operation failed."
+            ?: "操作失败。"
+
+    private companion object {
+        const val TEXT_TASK_ID = "plain-text-full"
+    }
 }

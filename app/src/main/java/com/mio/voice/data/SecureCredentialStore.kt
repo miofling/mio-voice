@@ -46,7 +46,7 @@ class SecureCredentialStore(context: Context) {
             val plain = cipher.doFinal(decode(cipherText))
             CredentialReadResult.Available(String(plain, Charsets.UTF_8))
         } catch (error: Exception) {
-            CredentialReadResult.DecryptionFailed("API key could not be decrypted. Please enter it again.")
+            CredentialReadResult.DecryptionFailed("API Key 解密失败，请重新填写。")
         }
     }
 

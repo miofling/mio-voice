@@ -26,11 +26,11 @@ class AudioCache(context: Context) {
             try {
                 if (partFile.exists()) partFile.delete()
                 val result = provider.generate(request)
-                require(result.audioBytes.isNotEmpty()) { "TTS provider returned empty audio." }
+                require(result.audioBytes.isNotEmpty()) { "TTS Provider 返回了空音频。" }
                 partFile.writeBytes(result.audioBytes)
-                require(partFile.length() > 0) { "Generated audio file is empty." }
+                require(partFile.length() > 0) { "生成的音频文件为空。" }
                 if (finalFile.exists()) finalFile.delete()
-                check(partFile.renameTo(finalFile)) { "Could not commit generated audio." }
+                check(partFile.renameTo(finalFile)) { "无法写入最终音频缓存文件。" }
                 finalFile
             } catch (error: Throwable) {
                 partFile.delete()

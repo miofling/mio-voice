@@ -25,13 +25,25 @@ class MiniMaxTtsProvider(
         .writeTimeout(30, TimeUnit.SECONDS)
         .build()
 ) : TtsProvider {
+    suspend fun fetchModels(config: ProviderConfig): List<String> {
+        val apiKey = config.apiKey?.takeIf { it.isNotBlank() }
+            ?: throw MiniMaxTtsException("请先填写 API Key。")
+        val httpRequest = Request.Builder()
+            .url(modelsUrl(config))
+            .header("Authorization", "Bearer $apiKey")
+            .get()
+            .build()
+        val responseText = client.newCall(httpRequest).awaitBody()
+        return parseModelsResponse(responseText)
+    }
+
     override suspend fun generate(request: TtsRequest): TtsResult {
         val apiKey = request.config.apiKey?.takeIf { it.isNotBlank() }
-            ?: throw MiniMaxTtsException("API key is required.")
+            ?: throw MiniMaxTtsException("请先填写 API Key。")
         val voiceId = request.voiceId.takeIf { it.isNotBlank() }
-            ?: throw MiniMaxTtsException("voice_id is required.")
+            ?: throw MiniMaxTtsException("请先填写 voice_id。")
         val model = request.model.takeIf { it.isNotBlank() }
-            ?: throw MiniMaxTtsException("Model is required.")
+            ?: throw MiniMaxTtsException("请先填写模型名。")
 
         val body = JSONObject()
             .put("model", model)
@@ -45,7 +57,7 @@ class MiniMaxTtsProvider(
                     .put("voice_id", voiceId)
                     .put("speed", request.speed.toDouble())
                     .put("vol", request.extraParams["vol"]?.toDoubleOrNull() ?: 1.0)
-                    .put("pitch", request.extraParams["pitch"]?.toDoubleOrNull() ?: 0.0)
+                    .put("pitch", request.pitch)
                     .also { voice ->
                         request.emotion?.takeIf { it.isNotBlank() }?.let { voice.put("emotion", it) }
                     }
@@ -87,11 +99,12 @@ class MiniMaxTtsProvider(
         val request = TtsRequest(
             providerProfileId = "minimax",
             config = config,
-            text = "Mio Voice connection test.",
+            text = "Mio Voice 连接测试。",
             voiceId = config.defaultVoiceId,
             model = config.model,
             speed = config.defaultSpeed,
             emotion = config.defaultEmotion,
+            pitch = 0,
             audioFormat = config.audioFormat
         )
         return generate(request)
@@ -105,13 +118,18 @@ class MiniMaxTtsProvider(
         return base + path
     }
 
+    private fun modelsUrl(config: ProviderConfig): String {
+        val base = config.baseUrl.ifBlank { "https://api.minimax.io" }.trimEnd('/')
+        return if (base.endsWith("/v1")) "$base/models" else "$base/v1/models"
+    }
+
     private suspend fun downloadAudio(url: String): ByteArray {
         val request = Request.Builder().url(url).get().build()
         return client.newCall(request).awaitBytes()
     }
 
     private fun parseTtsResponse(json: String, requestedFormat: String): ParsedAudio {
-        if (json.isBlank()) throw MiniMaxTtsException("MiniMax returned an empty response.")
+        if (json.isBlank()) throw MiniMaxTtsException("MiniMax 返回了空响应。")
         val root = JSONObject(json)
         val baseResp = root.optJSONObject("base_resp")
         val statusCode = baseResp?.optInt("status_code", 0) ?: 0
@@ -119,10 +137,10 @@ class MiniMaxTtsProvider(
             throw MiniMaxTtsException(mapBusinessError(statusCode, baseResp?.optString("status_msg").orEmpty()))
         }
         val data = root.optJSONObject("data")
-            ?: throw MiniMaxTtsException("MiniMax response did not include audio data.")
+            ?: throw MiniMaxTtsException("MiniMax 响应中没有音频数据。")
         val payload = listOf("audio", "audio_url", "url")
             .firstNotNullOfOrNull { key -> data.optString(key).takeIf { it.isNotBlank() } }
-            ?: throw MiniMaxTtsException("MiniMax response audio was empty.")
+            ?: throw MiniMaxTtsException("MiniMax 返回的音频为空。")
         val format = root.optJSONObject("extra_info")
             ?.optString("audio_format")
             ?.takeIf { it.isNotBlank() }
@@ -132,6 +150,35 @@ class MiniMaxTtsProvider(
             audioFormat = format,
             isRemoteUrl = payload.startsWith("http://") || payload.startsWith("https://")
         )
+    }
+
+    private fun parseModelsResponse(json: String): List<String> {
+        if (json.isBlank()) throw MiniMaxTtsException("模型列表响应为空。")
+        val root = JSONObject(json)
+        val baseResp = root.optJSONObject("base_resp")
+        val statusCode = baseResp?.optInt("status_code", 0) ?: 0
+        if (statusCode != 0) {
+            throw MiniMaxTtsException(mapBusinessError(statusCode, baseResp?.optString("status_msg").orEmpty()))
+        }
+        val result = mutableListOf<String>()
+        root.optJSONArray("data")?.let { data ->
+            for (i in 0 until data.length()) {
+                when (val item = data.get(i)) {
+                    is JSONObject -> item.optString("id").takeIf { it.isNotBlank() }?.let(result::add)
+                    is String -> item.takeIf { it.isNotBlank() }?.let(result::add)
+                }
+            }
+        }
+        root.optJSONArray("models")?.let { models ->
+            for (i in 0 until models.length()) {
+                when (val item = models.get(i)) {
+                    is JSONObject -> item.optString("id").takeIf { it.isNotBlank() }?.let(result::add)
+                    is String -> item.takeIf { it.isNotBlank() }?.let(result::add)
+                }
+            }
+        }
+        if (result.isEmpty()) throw MiniMaxTtsException("没有解析到可用模型，请保留手动填写模型名。")
+        return result.distinct().sorted()
     }
 
     private suspend fun Call.awaitBody(): String =
@@ -169,9 +216,9 @@ class MiniMaxTtsProvider(
                     response.use {
                         val bytes = it.body?.bytes() ?: ByteArray(0)
                         if (!it.isSuccessful) {
-                            continuation.resumeWithException(MiniMaxTtsException("Audio URL download failed with HTTP ${it.code}."))
+                            continuation.resumeWithException(MiniMaxTtsException("音频 URL 下载失败，HTTP ${it.code}。"))
                         } else if (bytes.isEmpty()) {
-                            continuation.resumeWithException(MiniMaxTtsException("Audio URL returned an empty file."))
+                            continuation.resumeWithException(MiniMaxTtsException("音频 URL 返回了空文件。"))
                         } else {
                             continuation.resume(bytes)
                         }
@@ -195,33 +242,33 @@ class MiniMaxTtsProvider(
             JSONObject(body).optJSONObject("base_resp")?.optString("status_msg")
         }.getOrNull()?.takeIf { it.isNotBlank() }
         val hint = when (code) {
-            401, 403 -> " Check API key, model access, and voice_id permissions."
-            408 -> " Request timed out."
-            429 -> " Rate limited. Retry later."
-            in 500..599 -> " MiniMax server error. Retry later."
+            401, 403 -> " 请检查 API Key、模型权限和 voice_id 权限。"
+            408 -> " 请求超时。"
+            429 -> " 触发限流，请稍后重试。"
+            in 500..599 -> " MiniMax 服务端错误，请稍后重试。"
             else -> ""
         }
-        return "MiniMax HTTP $code.${message?.let { " $it." } ?: ""}$hint"
+        return "MiniMax HTTP $code。${message?.let { " $it。" } ?: ""}$hint"
     }
 
     private fun mapBusinessError(code: Int, message: String): String {
         val detail = when (code) {
-            1001 -> "Request timed out."
-            1002, 2045, 2056 -> "Rate or usage limit reached."
-            1004, 2049 -> "API key is invalid or unauthorized."
-            1008 -> "Insufficient balance."
-            1042 -> "Input contains too many invisible or illegal characters."
-            2013 -> "Invalid request parameters."
-            20132 -> "Invalid samples or voice_id."
-            2042 -> "No access to this voice_id."
-            else -> message.ifBlank { "MiniMax business error." }
+            1001 -> "请求超时。"
+            1002, 2045, 2056 -> "触发限流或用量限制。"
+            1004, 2049 -> "API Key 无效或未授权。"
+            1008 -> "账户余额不足。"
+            1042 -> "输入包含过多不可见字符或非法字符。"
+            2013 -> "请求参数无效。"
+            20132 -> "音色样本或 voice_id 无效。"
+            2042 -> "当前账号无权使用这个 voice_id。"
+            else -> message.ifBlank { "MiniMax 业务错误。" }
         }
-        return "MiniMax error $code: $detail"
+        return "MiniMax 错误 $code：$detail"
     }
 
     private fun sanitizeNetworkError(error: IOException): String =
         error.message?.replace(Regex("Bearer\\s+[^\\s]+", RegexOption.IGNORE_CASE), "Bearer ***")
-            ?: "Network request failed."
+            ?: "网络请求失败。"
 
     private data class ParsedAudio(
         val payload: String,

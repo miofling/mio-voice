@@ -16,7 +16,7 @@ class FakeTtsProvider(
         delay(delayMs)
         coroutineContext.ensureActive()
         if (request.text.contains("[fail]", ignoreCase = true)) {
-            error("Simulated provider failure for this segment.")
+            error("Fake Provider 模拟此片段生成失败。")
         }
         val frequency = 360.0 + (request.text.hashCode().absoluteValue % 320)
         val duration = (420 + request.text.length * 12).coerceIn(420, 1800)

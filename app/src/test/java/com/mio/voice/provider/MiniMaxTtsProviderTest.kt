@@ -37,6 +37,7 @@ class MiniMaxTtsProviderTest {
             assertEquals("hello", body.getString("text"))
             assertEquals("voice-a", body.getJSONObject("voice_setting").getString("voice_id"))
             assertEquals("happy", body.getJSONObject("voice_setting").getString("emotion"))
+            assertEquals(2, body.getJSONObject("voice_setting").getInt("pitch"))
             assertEquals("wav", body.getJSONObject("audio_setting").getString("format"))
             assertEquals("wav", result.audioFormat)
             assertTrue(result.audioBytes.isNotEmpty())
@@ -61,8 +62,40 @@ class MiniMaxTtsProviderTest {
             val error = runCatching { provider.generate(request(server.url("/").toString())) }.exceptionOrNull()
 
             assertTrue(error is MiniMaxTtsException)
-            assertTrue(error?.message.orEmpty().contains("No access to this voice_id"))
+            assertTrue(error?.message.orEmpty().contains("无权使用这个 voice_id"))
             assertTrue(!error?.message.orEmpty().contains("test-key"))
+        }
+    }
+
+    @Test
+    fun fetchesModelsFromOpenAiCompatibleEndpoint() = runTest {
+        MockWebServer().use { server ->
+            server.enqueue(
+                MockResponse().setBody(
+                    """
+                    {
+                      "object": "list",
+                      "data": [
+                        {"id": "speech-2.8-hd", "object": "model"},
+                        {"id": "speech-2.8-turbo", "object": "model"}
+                      ]
+                    }
+                    """.trimIndent()
+                )
+            )
+
+            val provider = MiniMaxTtsProvider()
+            val models = provider.fetchModels(
+                ProviderConfig(
+                    baseUrl = server.url("/").toString(),
+                    apiKey = "test-key"
+                )
+            )
+            val recorded = server.takeRequest()
+
+            assertEquals("/v1/models", recorded.path)
+            assertEquals("Bearer test-key", recorded.getHeader("Authorization"))
+            assertEquals(listOf("speech-2.8-hd", "speech-2.8-turbo"), models)
         }
     }
 
@@ -81,6 +114,7 @@ class MiniMaxTtsProviderTest {
         model = "speech-2.8-hd",
         speed = 1.0f,
         emotion = "happy",
+        pitch = 2,
         audioFormat = "wav"
     )
 }
