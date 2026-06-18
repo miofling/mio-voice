@@ -25,7 +25,10 @@ data class AppSettings(
     val maxCharsPerRequest: Int = 2_000,
     val voices: List<VoiceProfile> = emptyList(),
     val defaultVoiceProfileId: String? = null,
-    val useFakeProvider: Boolean = true
+    val useFakeProvider: Boolean = true,
+    val directorBaseUrl: String = "",
+    val directorEndpointPath: String = "/v1/chat/completions",
+    val directorModel: String = ""
 ) {
     fun providerConfig(apiKey: String? = null): ProviderConfig = ProviderConfig(
         baseUrl = baseUrl,
@@ -37,6 +40,13 @@ data class AppSettings(
         defaultEmotion = defaultEmotion,
         audioFormat = "wav",
         maxCharsPerRequest = maxCharsPerRequest
+    )
+
+    fun directorConfig(apiKey: String? = null): DirectorConfig = DirectorConfig(
+        baseUrl = directorBaseUrl,
+        endpointPath = directorEndpointPath.ifBlank { "/v1/chat/completions" },
+        apiKey = apiKey,
+        model = directorModel
     )
 }
 
@@ -64,7 +74,10 @@ class AppSettingsStore(context: Context) {
                     fallbackPitch = 0
                 ),
                 defaultVoiceProfileId = prefs[Keys.defaultVoiceProfileId],
-                useFakeProvider = prefs[Keys.useFakeProvider] ?: true
+                useFakeProvider = prefs[Keys.useFakeProvider] ?: true,
+                directorBaseUrl = prefs[Keys.directorBaseUrl].orEmpty(),
+                directorEndpointPath = prefs[Keys.directorEndpointPath] ?: "/v1/chat/completions",
+                directorModel = prefs[Keys.directorModel].orEmpty()
             )
         }
 
@@ -81,6 +94,9 @@ class AppSettingsStore(context: Context) {
             settings.defaultVoiceProfileId?.let { prefs[Keys.defaultVoiceProfileId] = it }
                 ?: prefs.remove(Keys.defaultVoiceProfileId)
             prefs[Keys.useFakeProvider] = settings.useFakeProvider
+            prefs[Keys.directorBaseUrl] = settings.directorBaseUrl
+            prefs[Keys.directorEndpointPath] = settings.directorEndpointPath.ifBlank { "/v1/chat/completions" }
+            prefs[Keys.directorModel] = settings.directorModel
         }
     }
 
@@ -131,5 +147,8 @@ class AppSettingsStore(context: Context) {
         val voices = stringPreferencesKey("voices")
         val defaultVoiceProfileId = stringPreferencesKey("default_voice_profile_id")
         val useFakeProvider = booleanPreferencesKey("use_fake_provider")
+        val directorBaseUrl = stringPreferencesKey("director_base_url")
+        val directorEndpointPath = stringPreferencesKey("director_endpoint_path")
+        val directorModel = stringPreferencesKey("director_model")
     }
 }

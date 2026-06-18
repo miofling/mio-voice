@@ -22,45 +22,75 @@ sealed class CredentialReadResult {
     data class DecryptionFailed(val message: String) : CredentialReadResult()
 }
 
+enum class CredentialSlot(
+    val keyAlias: String,
+    val cipherTextKey: String,
+    val ivKey: String,
+    val versionKey: String,
+    val displayName: String
+) {
+    Tts(
+        keyAlias = "mio_voice_api_key_v1",
+        cipherTextKey = "cipher_text",
+        ivKey = "iv",
+        versionKey = "version",
+        displayName = "TTS API Key"
+    ),
+    Director(
+        keyAlias = "mio_voice_director_api_key_v1",
+        cipherTextKey = "director_cipher_text",
+        ivKey = "director_iv",
+        versionKey = "director_version",
+        displayName = "AI 导演 API Key"
+    )
+}
+
 class SecureCredentialStore(context: Context) {
     private val dataStore = context.applicationContext.secureCredentialDataStore
 
-    suspend fun saveApiKey(apiKey: String) {
+    suspend fun saveApiKey(apiKey: String, slot: CredentialSlot = CredentialSlot.Tts) {
         val cipher = Cipher.getInstance(TRANSFORMATION)
-        cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey())
+        cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey(slot))
         val encrypted = cipher.doFinal(apiKey.toByteArray(Charsets.UTF_8))
+        val keys = Keys(slot)
         dataStore.edit { prefs ->
-            prefs[Keys.cipherText] = encode(encrypted)
-            prefs[Keys.iv] = encode(cipher.iv)
-            prefs[Keys.version] = 1
+            prefs[keys.cipherText] = encode(encrypted)
+            prefs[keys.iv] = encode(cipher.iv)
+            prefs[keys.version] = 1
         }
     }
 
-    suspend fun readApiKey(): CredentialReadResult {
+    suspend fun readApiKey(slot: CredentialSlot = CredentialSlot.Tts): CredentialReadResult {
         val prefs = dataStore.data.first()
-        val cipherText = prefs[Keys.cipherText] ?: return CredentialReadResult.Available(null)
-        val iv = prefs[Keys.iv] ?: return CredentialReadResult.Available(null)
+        val keys = Keys(slot)
+        val cipherText = prefs[keys.cipherText] ?: return CredentialReadResult.Available(null)
+        val iv = prefs[keys.iv] ?: return CredentialReadResult.Available(null)
         return try {
             val cipher = Cipher.getInstance(TRANSFORMATION)
-            cipher.init(Cipher.DECRYPT_MODE, getOrCreateKey(), GCMParameterSpec(GCM_TAG_BITS, decode(iv)))
+            cipher.init(Cipher.DECRYPT_MODE, getOrCreateKey(slot), GCMParameterSpec(GCM_TAG_BITS, decode(iv)))
             val plain = cipher.doFinal(decode(cipherText))
             CredentialReadResult.Available(String(plain, Charsets.UTF_8))
         } catch (error: Exception) {
-            CredentialReadResult.DecryptionFailed("API Key 解密失败，请重新填写。")
+            CredentialReadResult.DecryptionFailed("${slot.displayName} 解密失败，请重新填写。")
         }
     }
 
-    suspend fun clear() {
-        dataStore.edit { it.clear() }
+    suspend fun clear(slot: CredentialSlot = CredentialSlot.Tts) {
+        val keys = Keys(slot)
+        dataStore.edit { prefs ->
+            prefs.remove(keys.cipherText)
+            prefs.remove(keys.iv)
+            prefs.remove(keys.version)
+        }
     }
 
-    private fun getOrCreateKey(): SecretKey {
+    private fun getOrCreateKey(slot: CredentialSlot): SecretKey {
         val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-        (keyStore.getEntry(KEY_ALIAS, null) as? KeyStore.SecretKeyEntry)?.let { return it.secretKey }
+        (keyStore.getEntry(slot.keyAlias, null) as? KeyStore.SecretKeyEntry)?.let { return it.secretKey }
 
         val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
         val spec = KeyGenParameterSpec.Builder(
-            KEY_ALIAS,
+            slot.keyAlias,
             KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
         )
             .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
@@ -78,14 +108,13 @@ class SecureCredentialStore(context: Context) {
     private fun decode(value: String): ByteArray =
         Base64.decode(value, Base64.NO_WRAP or Base64.URL_SAFE)
 
-    private object Keys {
-        val cipherText = stringPreferencesKey("cipher_text")
-        val iv = stringPreferencesKey("iv")
-        val version = intPreferencesKey("version")
+    private class Keys(slot: CredentialSlot) {
+        val cipherText = stringPreferencesKey(slot.cipherTextKey)
+        val iv = stringPreferencesKey(slot.ivKey)
+        val version = intPreferencesKey(slot.versionKey)
     }
 
     private companion object {
-        const val KEY_ALIAS = "mio_voice_api_key_v1"
         const val TRANSFORMATION = "AES/GCM/NoPadding"
         const val GCM_TAG_BITS = 128
     }

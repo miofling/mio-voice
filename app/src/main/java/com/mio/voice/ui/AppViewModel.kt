@@ -8,6 +8,7 @@ import com.mio.voice.core.TechnicalTextChunker
 import com.mio.voice.data.AppSettings
 import com.mio.voice.data.AppSettingsStore
 import com.mio.voice.data.CredentialReadResult
+import com.mio.voice.data.CredentialSlot
 import com.mio.voice.data.EmotionPreset
 import com.mio.voice.data.QueueSegment
 import com.mio.voice.data.ResolvedVoiceSettings
@@ -16,6 +17,12 @@ import com.mio.voice.data.SecureCredentialStore
 import com.mio.voice.data.TtsRequest
 import com.mio.voice.data.VoiceLibrary
 import com.mio.voice.data.VoiceProfile
+import com.mio.voice.director.DirectorDraftSegment
+import com.mio.voice.director.DirectorPresetInfo
+import com.mio.voice.director.DirectorRequest
+import com.mio.voice.director.DirectorResultValidator
+import com.mio.voice.director.DirectorValidationResult
+import com.mio.voice.director.OpenAiCompatibleDirectorProvider
 import com.mio.voice.playback.PlaybackState
 import com.mio.voice.playback.PlayerController
 import com.mio.voice.provider.FakeTtsProvider
@@ -31,6 +38,8 @@ import java.util.UUID
 
 enum class HomeMode { Text, Words }
 
+enum class TextGenerationMode { FixedPreset, AiDirector }
+
 private val TTS_MODEL_PRESETS = listOf(
     "speech-2.8-hd",
     "speech-2.8-turbo",
@@ -45,8 +54,10 @@ private val TTS_MODEL_PRESETS = listOf(
 data class AppUiState(
     val settings: AppSettings = AppSettings(),
     val apiKeyInput: String = "",
+    val aiApiKeyInput: String = "",
     val credentialMessage: String? = null,
     val homeMode: HomeMode = HomeMode.Text,
+    val textGenerationMode: TextGenerationMode = TextGenerationMode.FixedPreset,
     val textInput: String = "",
     val wordInput: String = "",
     val repeatCount: Int = 2,
@@ -68,10 +79,16 @@ data class AppUiState(
     val presetEmotionDraft: String = "neutral",
     val presetSpeedDraft: Float = 1.0f,
     val presetPitchDraft: Int = 0,
-    val presetPreviewTextDraft: String = "",
+    val presetPreviewTextDraft: String = VoiceLibrary.DEFAULT_PREVIEW_TEXT,
+    val presetDescriptionDraft: String = "",
     val editingPresetId: String? = null,
     val fetchedModels: List<String> = TTS_MODEL_PRESETS,
-    val isFetchingModels: Boolean = false
+    val isFetchingModels: Boolean = false,
+    val isAnalyzingDirector: Boolean = false,
+    val directorSegments: List<DirectorDraftSegment> = emptyList(),
+    val directorWarnings: List<String> = emptyList(),
+    val directorValidationMessage: String? = null,
+    val directorVoiceProfileId: String? = null
 )
 
 class AppViewModel(application: Application) : AndroidViewModel(application) {
@@ -81,6 +98,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val playerController = PlayerController(application)
     private val fakeProvider = FakeTtsProvider()
     private val miniMaxProvider = MiniMaxTtsProvider()
+    private val directorProvider = OpenAiCompatibleDirectorProvider()
     private var generationJob: Job? = null
 
     private val _uiState = MutableStateFlow(AppUiState())
@@ -111,7 +129,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
         viewModelScope.launch {
-            when (val credential = credentialStore.readApiKey()) {
+            when (val credential = credentialStore.readApiKey(CredentialSlot.Tts)) {
+                is CredentialReadResult.Available -> Unit
+                is CredentialReadResult.DecryptionFailed -> {
+                    _uiState.update { it.copy(credentialMessage = credential.message) }
+                }
+            }
+            when (val credential = credentialStore.readApiKey(CredentialSlot.Director)) {
                 is CredentialReadResult.Available -> Unit
                 is CredentialReadResult.DecryptionFailed -> {
                     _uiState.update { it.copy(credentialMessage = credential.message) }
@@ -126,6 +150,18 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         it.copy(
             homeMode = mode,
             segments = emptyList(),
+            directorSegments = if (mode == HomeMode.Text) it.directorSegments else emptyList(),
+            directorWarnings = if (mode == HomeMode.Text) it.directorWarnings else emptyList(),
+            directorValidationMessage = if (mode == HomeMode.Text) it.directorValidationMessage else null,
+            generatedCount = 0,
+            totalCount = 0,
+            statusMessage = null
+        )
+    }
+    fun updateTextGenerationMode(mode: TextGenerationMode) = _uiState.update {
+        it.copy(
+            textGenerationMode = mode,
+            segments = emptyList(),
             generatedCount = 0,
             totalCount = 0,
             statusMessage = null
@@ -136,7 +172,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun updateRepeatPause(value: Int) = _uiState.update { it.copy(repeatPauseMs = value.coerceIn(0, 5_000)) }
     fun updateWordPause(value: Int) = _uiState.update { it.copy(wordPauseMs = value.coerceIn(0, 10_000)) }
     fun updateApiKey(value: String) = _uiState.update { it.copy(apiKeyInput = value) }
+    fun updateAiApiKey(value: String) = _uiState.update { it.copy(aiApiKeyInput = value) }
     fun updateVoiceDraft(name: String, voiceId: String) = _uiState.update { it.copy(voiceNameDraft = name, voiceIdDraft = voiceId) }
+    fun startNewVoice() = _uiState.update {
+        it.copy(
+            editingVoiceId = null,
+            voiceNameDraft = "",
+            voiceIdDraft = ""
+        )
+    }
     fun selectVoice(profileId: String?) = _uiState.update { state ->
         val profile = state.settings.voices.firstOrNull { it.id == profileId }
         state.copy(
@@ -145,13 +189,21 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
     fun selectPreset(presetId: String?) = _uiState.update { it.copy(selectedPresetId = presetId) }
-    fun updatePresetDraft(label: String, emotion: String, speed: Float, pitch: Int, previewText: String) = _uiState.update {
+    fun updatePresetDraft(
+        label: String,
+        emotion: String,
+        speed: Float,
+        pitch: Int,
+        previewText: String,
+        description: String = _uiState.value.presetDescriptionDraft
+    ) = _uiState.update {
         it.copy(
             presetLabelDraft = label,
             presetEmotionDraft = emotion,
             presetSpeedDraft = speed.coerceIn(0.5f, 2.0f),
             presetPitchDraft = pitch.coerceIn(-12, 12),
-            presetPreviewTextDraft = previewText
+            presetPreviewTextDraft = previewText,
+            presetDescriptionDraft = description
         )
     }
 
@@ -163,7 +215,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         defaultSpeed: Float,
         defaultEmotion: String?,
         maxCharsPerRequest: Int,
-        useFakeProvider: Boolean
+        useFakeProvider: Boolean,
+        directorBaseUrl: String,
+        directorEndpointPath: String,
+        directorModel: String
     ) {
         viewModelScope.launch {
             val current = _uiState.value.settings
@@ -176,12 +231,17 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     defaultSpeed = defaultSpeed,
                     defaultEmotion = defaultEmotion,
                     maxCharsPerRequest = maxCharsPerRequest.coerceIn(200, 20_000),
-                    useFakeProvider = useFakeProvider
+                    useFakeProvider = useFakeProvider,
+                    directorBaseUrl = directorBaseUrl,
+                    directorEndpointPath = directorEndpointPath.ifBlank { "/v1/chat/completions" },
+                    directorModel = directorModel
                 )
             )
             val apiKey = _uiState.value.apiKeyInput
-            if (apiKey.isNotBlank()) credentialStore.saveApiKey(apiKey)
-            _uiState.update { it.copy(statusMessage = "设置已保存。", apiKeyInput = "") }
+            if (apiKey.isNotBlank()) credentialStore.saveApiKey(apiKey, CredentialSlot.Tts)
+            val aiApiKey = _uiState.value.aiApiKeyInput
+            if (aiApiKey.isNotBlank()) credentialStore.saveApiKey(aiApiKey, CredentialSlot.Director)
+            _uiState.update { it.copy(statusMessage = "设置已保存。", apiKeyInput = "", aiApiKeyInput = "") }
         }
     }
 
@@ -241,7 +301,22 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 presetEmotionDraft = preset.emotion,
                 presetSpeedDraft = preset.speed,
                 presetPitchDraft = preset.pitch,
-                presetPreviewTextDraft = preset.previewText
+                presetPreviewTextDraft = preset.previewText,
+                presetDescriptionDraft = preset.description
+            )
+        }
+    }
+
+    fun startNewPreset() {
+        _uiState.update {
+            it.copy(
+                editingPresetId = null,
+                presetLabelDraft = "",
+                presetEmotionDraft = "neutral",
+                presetSpeedDraft = 1.0f,
+                presetPitchDraft = 0,
+                presetPreviewTextDraft = VoiceLibrary.DEFAULT_PREVIEW_TEXT,
+                presetDescriptionDraft = ""
             )
         }
     }
@@ -258,7 +333,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 emotion = state.presetEmotionDraft,
                 speed = state.presetSpeedDraft,
                 pitch = state.presetPitchDraft,
-                previewText = state.presetPreviewTextDraft
+                previewText = state.presetPreviewTextDraft,
+                description = state.presetDescriptionDraft
             )
             voices[index] = VoiceLibrary.upsertPreset(voices[index], preset, makeDefault)
             settingsStore.save(state.settings.copy(voices = voices))
@@ -269,7 +345,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     presetEmotionDraft = "neutral",
                     presetSpeedDraft = 1.0f,
                     presetPitchDraft = 0,
-                    presetPreviewTextDraft = "",
+                    presetPreviewTextDraft = VoiceLibrary.DEFAULT_PREVIEW_TEXT,
+                    presetDescriptionDraft = "",
                     selectedPresetId = if (makeDefault) preset.id else it.selectedPresetId,
                     statusMessage = "预设已保存。"
                 )
@@ -339,8 +416,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun clearCredentials() {
         viewModelScope.launch {
-            credentialStore.clear()
+            credentialStore.clear(CredentialSlot.Tts)
             _uiState.update { it.copy(apiKeyInput = "", statusMessage = "凭证已清除。") }
+        }
+    }
+
+    fun clearDirectorCredentials() {
+        viewModelScope.launch {
+            credentialStore.clear(CredentialSlot.Director)
+            _uiState.update { it.copy(aiApiKeyInput = "", statusMessage = "AI 导演凭证已清除。") }
         }
     }
 
@@ -352,6 +436,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun generate() {
+        val current = _uiState.value
+        if (current.homeMode == HomeMode.Text && current.textGenerationMode == TextGenerationMode.AiDirector) {
+            if (current.directorSegments.isEmpty()) analyzeDirector() else confirmDirectorGeneration()
+            return
+        }
         generationJob?.cancel()
         generationJob = viewModelScope.launch {
             val state = _uiState.value
@@ -387,6 +476,174 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 playerController.setQueue(queue.filter { it.status == SegmentStatus.Ready })
             } catch (error: Exception) {
                 _uiState.update { it.copy(isGenerating = false, statusMessage = sanitize(error)) }
+            }
+        }
+    }
+
+    fun analyzeDirector() {
+        generationJob?.cancel()
+        generationJob = viewModelScope.launch {
+            val state = _uiState.value
+            val text = state.textInput
+            val voice = selectedVoiceForDirector(state)
+            val error = directorPrerequisiteError(state, text, voice)
+            if (error != null || voice == null) {
+                _uiState.update { it.copy(statusMessage = error ?: "请先选择父音色。") }
+                return@launch
+            }
+            val apiKey = state.aiApiKeyInput.takeIf { it.isNotBlank() } ?: readDirectorApiKeyOrNull()
+            val request = DirectorRequest(
+                text = text,
+                voiceProfileId = voice.id,
+                defaultPresetId = voice.defaultPresetId,
+                presets = voice.presets.map { preset ->
+                    DirectorPresetInfo(
+                        presetId = preset.id,
+                        label = preset.label,
+                        description = preset.description
+                    )
+                },
+                config = state.settings.directorConfig(apiKey)
+            )
+            _uiState.update {
+                it.copy(
+                    isAnalyzingDirector = true,
+                    directorSegments = emptyList(),
+                    directorWarnings = emptyList(),
+                    directorValidationMessage = null,
+                    directorVoiceProfileId = voice.id,
+                    statusMessage = "AI 导演正在分析文本..."
+                )
+            }
+            try {
+                val result = directorProvider.analyze(request)
+                when (val validation = DirectorResultValidator.validate(text, voice, result)) {
+                    is DirectorValidationResult.Valid -> {
+                        _uiState.update {
+                            it.copy(
+                                isAnalyzingDirector = false,
+                                directorSegments = validation.segments,
+                                directorWarnings = validation.warnings,
+                                directorValidationMessage = null,
+                                statusMessage = "AI 导演已生成 ${validation.segments.size} 个配音块，请预览后确认生成。"
+                            )
+                        }
+                    }
+                    is DirectorValidationResult.Invalid -> {
+                        _uiState.update {
+                            it.copy(
+                                isAnalyzingDirector = false,
+                                directorSegments = emptyList(),
+                                directorWarnings = emptyList(),
+                                directorValidationMessage = validation.message,
+                                statusMessage = validation.message
+                            )
+                        }
+                    }
+                }
+            } catch (error: Exception) {
+                _uiState.update {
+                    it.copy(
+                        isAnalyzingDirector = false,
+                        directorValidationMessage = sanitize(error),
+                        statusMessage = sanitize(error)
+                    )
+                }
+            }
+        }
+    }
+
+    fun updateDirectorSegmentPreset(segmentId: String, presetId: String) {
+        _uiState.update { state ->
+            state.copy(
+                directorSegments = state.directorSegments.map { segment ->
+                    if (segment.id == segmentId) segment.copy(presetId = presetId, warnings = emptyList()) else segment
+                }
+            )
+        }
+    }
+
+    fun mergeDirectorSegmentWithNext(segmentId: String) {
+        _uiState.update { state ->
+            val index = state.directorSegments.indexOfFirst { it.id == segmentId }
+            if (index < 0 || index >= state.directorSegments.lastIndex) return@update state
+            val merged = state.directorSegments.toMutableList()
+            val current = merged[index]
+            val next = merged.removeAt(index + 1)
+            merged[index] = current.copy(
+                text = current.text + next.text,
+                warnings = current.warnings + next.warnings
+            )
+            state.copy(directorSegments = merged.mapIndexed { i, segment -> segment.copy(id = "director-$i") })
+        }
+    }
+
+    fun discardDirectorResult() {
+        _uiState.update {
+            it.copy(
+                textGenerationMode = TextGenerationMode.FixedPreset,
+                directorSegments = emptyList(),
+                directorWarnings = emptyList(),
+                directorValidationMessage = null,
+                directorVoiceProfileId = null,
+                statusMessage = "已放弃 AI 导演结果。"
+            )
+        }
+    }
+
+    fun confirmDirectorGeneration() {
+        generationJob?.cancel()
+        generationJob = viewModelScope.launch {
+            val state = _uiState.value
+            val voiceProfileId = state.directorVoiceProfileId ?: state.selectedVoiceProfileId
+            if (state.directorSegments.isEmpty() || voiceProfileId == null) {
+                _uiState.update { it.copy(statusMessage = "请先运行 AI 导演分析。") }
+                return@launch
+            }
+            val initial = state.directorSegments.map { draft ->
+                QueueSegment(
+                    id = draft.id,
+                    text = draft.text,
+                    audioFile = null,
+                    status = SegmentStatus.Pending
+                )
+            }
+            _uiState.update {
+                it.copy(
+                    isGenerating = true,
+                    generatedCount = 0,
+                    totalCount = initial.size,
+                    segments = initial,
+                    statusMessage = null
+                )
+            }
+            state.directorSegments.forEach { draft ->
+                val resolved = VoiceLibrary.resolvePreset(_uiState.value.settings.voices, voiceProfileId, draft.presetId)
+                if (resolved == null) {
+                    updateSegment(draft.id) { it.copy(status = SegmentStatus.Failed, errorMessage = "预设解析失败。") }
+                    return@forEach
+                }
+                val request = buildRequest(draft.text, _uiState.value, resolved)
+                updateSegment(draft.id) { it.copy(status = SegmentStatus.Generating, request = request) }
+                try {
+                    val file = audioCache.getOrGenerate(request, providerFor(_uiState.value.settings))
+                    updateSegment(draft.id) {
+                        it.copy(status = SegmentStatus.Ready, audioFile = file, errorMessage = null, request = request)
+                    }
+                    _uiState.update { it.copy(generatedCount = it.generatedCount + 1) }
+                } catch (error: Exception) {
+                    updateSegment(draft.id) {
+                        it.copy(status = SegmentStatus.Failed, errorMessage = sanitize(error), request = request)
+                    }
+                }
+            }
+            val ready = _uiState.value.segments.filter { it.status == SegmentStatus.Ready }
+            playerController.setQueue(ready)
+            _uiState.update {
+                it.copy(
+                    isGenerating = false,
+                    statusMessage = "AI 导演生成完成：${ready.size}/${it.totalCount} 段可播放。"
+                )
             }
         }
     }
@@ -450,6 +707,44 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 val file = audioCache.writeTemporary("test_connection", result.audioBytes, result.audioFormat)
                 playerController.playFile(file)
                 _uiState.update { it.copy(statusMessage = "测试连接已生成短语音并开始试听。") }
+            } catch (error: Exception) {
+                _uiState.update { it.copy(statusMessage = sanitize(error)) }
+            }
+        }
+    }
+
+    fun testDirectorConnection(
+        baseUrl: String? = null,
+        endpointPath: String? = null,
+        model: String? = null
+    ) {
+        viewModelScope.launch {
+            val state = _uiState.value
+            val settings = state.settings.copy(
+                directorBaseUrl = baseUrl ?: state.settings.directorBaseUrl,
+                directorEndpointPath = endpointPath ?: state.settings.directorEndpointPath,
+                directorModel = model ?: state.settings.directorModel
+            )
+            val apiKey = state.aiApiKeyInput.takeIf { it.isNotBlank() } ?: readDirectorApiKeyOrNull()
+            val error = directorConfigError(settings, apiKey)
+            if (error != null) {
+                _uiState.update { it.copy(statusMessage = error) }
+                return@launch
+            }
+            try {
+                directorProvider.analyze(
+                    DirectorRequest(
+                        text = "今天很开心。后来有点难过。",
+                        voiceProfileId = "test",
+                        defaultPresetId = "neutral",
+                        presets = listOf(
+                            DirectorPresetInfo("neutral", "默认", "平静自然。"),
+                            DirectorPresetInfo("happy", "开心", "愉快明亮。")
+                        ),
+                        config = settings.directorConfig(apiKey)
+                    )
+                )
+                _uiState.update { it.copy(statusMessage = "AI 导演连接测试成功。") }
             } catch (error: Exception) {
                 _uiState.update { it.copy(statusMessage = sanitize(error)) }
             }
@@ -638,12 +933,45 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
+    private fun selectedVoiceForDirector(state: AppUiState): VoiceProfile? {
+        val voiceProfileId = state.selectedVoiceProfileId
+            ?: state.settings.defaultVoiceProfileId
+            ?: state.settings.voices.firstOrNull()?.id
+        return state.settings.voices.firstOrNull { it.id == voiceProfileId }
+    }
+
+    private suspend fun directorPrerequisiteError(
+        state: AppUiState,
+        text: String,
+        voice: VoiceProfile?
+    ): String? {
+        if (text.isBlank()) return "请先输入文本。"
+        if (voice == null) return "请先选择父音色。"
+        if (voice.presets.isEmpty()) return "当前父音色没有可用预设。"
+        val apiKey = state.aiApiKeyInput.takeIf { it.isNotBlank() } ?: readDirectorApiKeyOrNull()
+        return directorConfigError(state.settings, apiKey)
+    }
+
+    private fun directorConfigError(settings: AppSettings, apiKey: String?): String? {
+        if (settings.directorBaseUrl.isBlank()) return "请先填写 AI 导演 Base URL。"
+        if (settings.directorEndpointPath.isBlank()) return "请先填写 AI 导演 Endpoint。"
+        if (settings.directorModel.isBlank()) return "请先填写 AI 导演模型名。"
+        if (apiKey.isNullOrBlank()) return "请先填写 AI 导演 API Key。"
+        return null
+    }
+
     private fun providerFor(settings: AppSettings): TtsProvider {
         return if (settings.useFakeProvider) fakeProvider else miniMaxProvider
     }
 
     private suspend fun readApiKeyOrNull(): String? =
-        when (val credential = credentialStore.readApiKey()) {
+        when (val credential = credentialStore.readApiKey(CredentialSlot.Tts)) {
+            is CredentialReadResult.Available -> credential.apiKey
+            is CredentialReadResult.DecryptionFailed -> null
+        }
+
+    private suspend fun readDirectorApiKeyOrNull(): String? =
+        when (val credential = credentialStore.readApiKey(CredentialSlot.Director)) {
             is CredentialReadResult.Available -> credential.apiKey
             is CredentialReadResult.DecryptionFailed -> null
         }

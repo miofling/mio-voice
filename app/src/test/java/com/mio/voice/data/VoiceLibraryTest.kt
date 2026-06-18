@@ -17,6 +17,7 @@ class VoiceLibraryTest {
         assertEquals("neutral", voice.presets.first().emotion)
         assertEquals(1.0f, voice.presets.first().speed)
         assertEquals(0, voice.presets.first().pitch)
+        assertEquals(VoiceLibrary.DEFAULT_PREVIEW_TEXT, voice.presets.first().previewText)
     }
 
     @Test
@@ -80,6 +81,17 @@ class VoiceLibraryTest {
     }
 
     @Test
+    fun oldPresetDataMigratesDescriptionToEmptyString() {
+        val presetRow = listOf("p1", "默认", "neutral", "1.0", "0", "试听").joinToString(",") { encode(it) }
+        val legacyV2 = listOf("2", encode("v1"), encode("Voice"), encode("voice-a"), encode("p1"), encode(presetRow))
+            .joinToString("\t")
+
+        val voices = VoiceLibrary.deserializeVoices(legacyV2)
+
+        assertEquals("", voices.first().presets.first().description)
+    }
+
+    @Test
     fun resolvedPresetConvertsToTtsParameters() {
         val voice = VoiceLibrary.upsertPreset(
             VoiceLibrary.createVoice("A", "voice-a", id = "a"),
@@ -132,4 +144,7 @@ class VoiceLibraryTest {
         pitch = pitch,
         audioFormat = "wav"
     )
+
+    private fun encode(value: String): String =
+        java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(value.toByteArray())
 }

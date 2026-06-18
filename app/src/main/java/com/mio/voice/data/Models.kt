@@ -16,7 +16,8 @@ data class EmotionPreset(
     val emotion: String,
     val speed: Float,
     val pitch: Int,
-    val previewText: String = ""
+    val previewText: String = "",
+    val description: String = ""
 )
 
 data class ResolvedVoiceSettings(
@@ -38,6 +39,13 @@ data class ProviderConfig(
     val defaultEmotion: String? = null,
     val audioFormat: String = "mp3",
     val maxCharsPerRequest: Int = 2_000
+)
+
+data class DirectorConfig(
+    val baseUrl: String = "",
+    val endpointPath: String = "/v1/chat/completions",
+    val apiKey: String? = null,
+    val model: String = ""
 )
 
 data class TtsRequest(

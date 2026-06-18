@@ -4,6 +4,7 @@ import java.util.UUID
 
 object VoiceLibrary {
     val allowedEmotions = setOf("neutral", "happy", "sad", "angry", "fearful", "disgusted", "surprised")
+    const val DEFAULT_PREVIEW_TEXT = "你好，这是 Mio Voice 的音色试听。"
 
     fun defaultPreset(
         emotion: String? = null,
@@ -14,7 +15,9 @@ object VoiceLibrary {
         label = "默认",
         emotion = normalizeEmotion(emotion),
         speed = normalizeSpeed(speed),
-        pitch = normalizePitch(pitch)
+        pitch = normalizePitch(pitch),
+        previewText = DEFAULT_PREVIEW_TEXT,
+        description = ""
     )
 
     fun createVoice(
@@ -60,7 +63,9 @@ object VoiceLibrary {
             label = preset.label.ifBlank { "默认" },
             emotion = normalizeEmotion(preset.emotion),
             speed = normalizeSpeed(preset.speed),
-            pitch = normalizePitch(preset.pitch)
+            pitch = normalizePitch(preset.pitch),
+            previewText = preset.previewText.ifBlank { DEFAULT_PREVIEW_TEXT },
+            description = preset.description
         )
 
     fun upsertPreset(profile: VoiceProfile, preset: EmotionPreset, makeDefault: Boolean): VoiceProfile {
@@ -120,7 +125,7 @@ object VoiceLibrary {
         voices.joinToString("\n") { profile ->
             val normalized = normalizeVoice(profile)
             listOf(
-                "2",
+                "3",
                 encodePart(normalized.id),
                 encodePart(normalized.displayName),
                 encodePart(normalized.voiceId),
@@ -149,7 +154,7 @@ object VoiceLibrary {
                             defaultSpeed = fallbackSpeed,
                             defaultPitch = fallbackPitch
                         )
-                        parts.size >= 6 && parts[0] == "2" -> normalizeVoice(
+                        parts.size >= 6 && (parts[0] == "2" || parts[0] == "3") -> normalizeVoice(
                             VoiceProfile(
                                 id = decodePart(parts[1]),
                                 displayName = decodePart(parts[2]),
@@ -175,7 +180,8 @@ object VoiceLibrary {
                 normalized.emotion,
                 normalized.speed.toString(),
                 normalized.pitch.toString(),
-                normalized.previewText
+                normalized.previewText,
+                normalized.description
             ).joinToString(",") { encodePart(it) }
         }
 
@@ -192,7 +198,8 @@ object VoiceLibrary {
                         emotion = decodePart(parts[2]),
                         speed = decodePart(parts[3]).toFloatOrNull() ?: 1.0f,
                         pitch = decodePart(parts[4]).toIntOrNull() ?: 0,
-                        previewText = decodePart(parts[5])
+                        previewText = decodePart(parts[5]),
+                        description = parts.getOrNull(6)?.let(::decodePart).orEmpty()
                     )
                 }.getOrNull()
             }
