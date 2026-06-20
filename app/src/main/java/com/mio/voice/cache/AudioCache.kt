@@ -12,8 +12,17 @@ import java.nio.ByteOrder
 import kotlin.math.PI
 import kotlin.math.sin
 
-class AudioCache(context: Context) {
-    private val audioDir = File(context.cacheDir, "tts_audio").apply { mkdirs() }
+class AudioCache private constructor(private val audioDir: File) {
+    init {
+        audioDir.mkdirs()
+    }
+
+    constructor(context: Context) : this(File(context.cacheDir, "tts_audio"))
+
+    companion object {
+        /** 测试 / 内部使用：直接指定音频缓存目录（避免依赖 Android Context）。 */
+        internal fun forDir(dir: File): AudioCache = AudioCache(dir)
+    }
 
     suspend fun getOrGenerate(request: TtsRequest, provider: TtsProvider): File =
         withContext(Dispatchers.IO) {
@@ -49,6 +58,36 @@ class AudioCache(context: Context) {
 
     suspend fun clear() = withContext(Dispatchers.IO) {
         audioDir.listFiles()?.forEach { it.delete() }
+    }
+
+    /**
+     * 修剪试听 / 生成音频缓存目录，避免无限增长：先删超龄文件，若仍超量再按最旧顺序删除，
+     * 直到文件数 <= [maxFiles]。仅作用于本目录，不影响其它缓存。
+     * @param maxFiles 保留的最大文件数。
+     * @param maxAgeMs 超过该时长（毫秒）的文件视为过期并删除。
+     */
+    suspend fun trimPreviewCache(
+        maxFiles: Int = 40,
+        maxAgeMs: Long = 7L * 24 * 60 * 60 * 1000
+    ) = withContext(Dispatchers.IO) {
+        val now = System.currentTimeMillis()
+        val files = audioDir.listFiles()?.filter { it.isFile }?.toMutableList() ?: return@withContext
+        // 1) 删除超龄文件。
+        val iterator = files.iterator()
+        while (iterator.hasNext()) {
+            val file = iterator.next()
+            if (now - file.lastModified() > maxAgeMs) {
+                if (file.delete()) iterator.remove()
+            }
+        }
+        // 2) 仍超量时按最旧顺序删除。
+        if (files.size > maxFiles) {
+            files.sortBy { it.lastModified() }
+            val removeCount = files.size - maxFiles
+            for (i in 0 until removeCount) {
+                files[i].delete()
+            }
+        }
     }
 
     suspend fun writeTemporary(name: String, bytes: ByteArray, extension: String): File =

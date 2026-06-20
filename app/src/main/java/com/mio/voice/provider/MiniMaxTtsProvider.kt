@@ -18,6 +18,13 @@ import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
+/** MiniMax 官方查询接口返回的单个系统音色。 */
+data class OfficialVoice(
+    val voiceId: String,
+    val voiceName: String,
+    val description: String = ""
+)
+
 class MiniMaxTtsProvider(
     private val client: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
@@ -35,6 +42,20 @@ class MiniMaxTtsProvider(
             .build()
         val responseText = client.newCall(httpRequest).awaitBody()
         return parseModelsResponse(responseText)
+    }
+
+    /** 拉取 MiniMax 账号可用的官方系统音色列表（POST /v1/get_voice）。 */
+    suspend fun fetchSystemVoices(config: ProviderConfig): List<OfficialVoice> {
+        val apiKey = config.apiKey?.takeIf { it.isNotBlank() }
+            ?: throw MiniMaxTtsException("请先填写 API Key。")
+        val body = JSONObject().put("voice_type", "all")
+        val httpRequest = Request.Builder()
+            .url(getVoiceUrl(config))
+            .header("Authorization", "Bearer $apiKey")
+            .post(body.toString().toRequestBody(JSON))
+            .build()
+        val responseText = client.newCall(httpRequest).awaitBody()
+        return parseSystemVoices(responseText)
     }
 
     override suspend fun generate(request: TtsRequest): TtsResult {
@@ -70,6 +91,9 @@ class MiniMaxTtsProvider(
                     .put("format", request.audioFormat)
                     .put("channel", request.extraParams["channel"]?.toIntOrNull() ?: 1)
             )
+
+        // voice_modify（顶层声音效果器，独立于音色）：仅当预设私有袋里有非默认值时才发送。
+        MiniMaxVoiceModify.buildJson(request.extraParams)?.let { body.put("voice_modify", it) }
 
         val httpRequest = Request.Builder()
             .url(endpointUrl(request.config))
@@ -121,6 +145,11 @@ class MiniMaxTtsProvider(
     private fun modelsUrl(config: ProviderConfig): String {
         val base = config.baseUrl.ifBlank { "https://api.minimax.io" }.trimEnd('/')
         return if (base.endsWith("/v1")) "$base/models" else "$base/v1/models"
+    }
+
+    private fun getVoiceUrl(config: ProviderConfig): String {
+        val base = config.baseUrl.ifBlank { "https://api.minimax.io" }.trimEnd('/')
+        return if (base.endsWith("/v1")) "$base/get_voice" else "$base/v1/get_voice"
     }
 
     private suspend fun downloadAudio(url: String): ByteArray {
@@ -179,6 +208,35 @@ class MiniMaxTtsProvider(
         }
         if (result.isEmpty()) throw MiniMaxTtsException("没有解析到可用模型，请保留手动填写模型名。")
         return result.distinct().sorted()
+    }
+
+    private fun parseSystemVoices(json: String): List<OfficialVoice> {
+        if (json.isBlank()) throw MiniMaxTtsException("音色列表响应为空。")
+        val root = JSONObject(json)
+        val baseResp = root.optJSONObject("base_resp")
+        val statusCode = baseResp?.optInt("status_code", 0) ?: 0
+        if (statusCode != 0) {
+            throw MiniMaxTtsException(mapBusinessError(statusCode, baseResp?.optString("status_msg").orEmpty()))
+        }
+        val result = mutableListOf<OfficialVoice>()
+        root.optJSONArray("system_voice")?.let { arr ->
+            for (i in 0 until arr.length()) {
+                val item = arr.optJSONObject(i) ?: continue
+                val voiceId = item.optString("voice_id").takeIf { it.isNotBlank() } ?: continue
+                val voiceName = item.optString("voice_name").takeIf { it.isNotBlank() } ?: voiceId
+                val descArr = item.optJSONArray("description")
+                val description = if (descArr != null && descArr.length() > 0) {
+                    (0 until descArr.length())
+                        .mapNotNull { idx -> descArr.optString(idx).takeIf { it.isNotBlank() } }
+                        .joinToString(" ")
+                } else {
+                    item.optString("description").orEmpty()
+                }
+                result += OfficialVoice(voiceId, voiceName, description.trim())
+            }
+        }
+        if (result.isEmpty()) throw MiniMaxTtsException("没有解析到官方音色。")
+        return result.distinctBy { it.voiceId }.sortedBy { it.voiceName }
     }
 
     private suspend fun Call.awaitBody(): String =

@@ -112,6 +112,91 @@ class DirectorResultValidatorTest {
         )
     }
 
+    @Test
+    fun allowTagsAcceptsLegalTagsAndReconstructsOriginal() {
+        // 标记紧贴正文插入（无额外空格），剥离后必须与原文逐字一致。
+        val result = DirectorResultValidator.parseAndValidate(
+            json = """{"segments":[{"text":"他笑了(laughs)，然后说。<#0.5#>","presetId":"happy"}]}""",
+            originalText = "他笑了，然后说。",
+            voiceProfile = voice(),
+            allowTags = true
+        )
+
+        assertTrue(result is DirectorValidationResult.Valid)
+        result as DirectorValidationResult.Valid
+        // 带标记的文本原样保留，发给 MiniMax。
+        assertEquals("他笑了(laughs)，然后说。<#0.5#>", result.segments.first().text)
+    }
+
+    @Test
+    fun allowTagsRejectsUnknownTag() {
+        val result = DirectorResultValidator.parseAndValidate(
+            json = """{"segments":[{"text":"他笑了 (giggle) 然后说。","presetId":"happy"}]}""",
+            originalText = "他笑了 然后说。",
+            voiceProfile = voice(),
+            allowTags = true
+        )
+
+        assertTrue(result is DirectorValidationResult.Invalid)
+    }
+
+    @Test
+    fun allowTagsStillRejectsModifiedBodyText() {
+        // 即便开启标记，改了正文（！换。）仍判废——防幻觉护栏仍在。
+        val result = DirectorResultValidator.parseAndValidate(
+            json = """{"segments":[{"text":"开心！(laughs)","presetId":"happy"}]}""",
+            originalText = "开心。",
+            voiceProfile = voice(),
+            allowTags = true
+        )
+
+        assertTrue(result is DirectorValidationResult.Invalid)
+    }
+
+    @Test
+    fun defaultDisallowsTagsSoTaggedTextFailsReconstruction() {
+        // 默认 allowTags=false：插入的标记会让拼接文本 != 原文 → 判废（旧行为保持）。
+        val result = DirectorResultValidator.parseAndValidate(
+            json = """{"segments":[{"text":"开心。(laughs)","presetId":"happy"}]}""",
+            originalText = "开心。",
+            voiceProfile = voice()
+        )
+
+        assertTrue(result is DirectorValidationResult.Invalid)
+    }
+
+    @Test
+    fun toleratesWhitespaceDifferenceAndRebindsToOriginal() {
+        // 小模型在段内多/少了空格，但非空白字符顺序一致 → 容忍空白差异，回镀回原文切片。
+        val result = DirectorResultValidator.parseAndValidate(
+            json = """{"segments":[{"text":"他说： 你好。","presetId":"happy"},{"text":"世界。","presetId":"sad"}]}""",
+            originalText = "他说：你好。世界。",
+            voiceProfile = voice()
+        )
+
+        assertTrue(result is DirectorValidationResult.Valid)
+        result as DirectorValidationResult.Valid
+        assertEquals(2, result.segments.size)
+        // 回镀后用的是原文切片（不含 AI 多加的空格），拼接等于原文。
+        assertEquals("他说：你好。", result.segments[0].text)
+        assertEquals("世界。", result.segments[1].text)
+        assertEquals("他说：你好。世界。", result.segments.joinToString("") { it.text })
+    }
+
+    @Test
+    fun rebindKeepsOriginalPunctuationWhenModelDropsSpaces() {
+        // AI 段去掉了原文里的空格，回镀必须用原文的空格/标点版本而非 AI 版本。
+        val result = DirectorResultValidator.parseAndValidate(
+            json = """{"segments":[{"text":"Hello,world.","presetId":"happy"}]}""",
+            originalText = "Hello, world.",
+            voiceProfile = voice()
+        )
+
+        assertTrue(result is DirectorValidationResult.Valid)
+        result as DirectorValidationResult.Valid
+        assertEquals("Hello, world.", result.segments.first().text)
+    }
+
     private fun voice() =
         VoiceLibrary.upsertPreset(
             VoiceLibrary.upsertPreset(

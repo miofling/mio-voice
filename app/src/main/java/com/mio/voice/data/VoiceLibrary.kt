@@ -3,7 +3,10 @@ package com.mio.voice.data
 import java.util.UUID
 
 object VoiceLibrary {
-    val allowedEmotions = setOf("neutral", "happy", "sad", "angry", "fearful", "disgusted", "surprised")
+    // MiniMax T2A v2 合法 emotion 值（speech-2.8 系列支持的子集）。
+    // 中性对应官方的 "calm"；旧数据里历史遗留的 "neutral" 在 normalizeEmotion 中迁移为 "calm"。
+    // 注意：whisper/fluent 仅 2.6 系列支持，2.8 不支持，故不纳入。
+    val allowedEmotions = setOf("calm", "happy", "sad", "angry", "fearful", "disgusted", "surprised")
     const val DEFAULT_PREVIEW_TEXT = "你好，这是 Mio Voice 的音色试听。"
 
     fun defaultPreset(
@@ -26,7 +29,12 @@ object VoiceLibrary {
         id: String = UUID.randomUUID().toString(),
         defaultEmotion: String? = null,
         defaultSpeed: Float = 1.0f,
-        defaultPitch: Int = 0
+        defaultPitch: Int = 0,
+        description: String = "",
+        language: String = "",
+        style: String = "",
+        createdAt: Long = System.currentTimeMillis(),
+        avatarPath: String? = null
     ): VoiceProfile {
         val preset = defaultPreset(defaultEmotion, defaultSpeed, defaultPitch)
         return VoiceProfile(
@@ -34,8 +42,27 @@ object VoiceLibrary {
             displayName = displayName.ifBlank { voiceId },
             voiceId = voiceId,
             defaultPresetId = preset.id,
-            presets = listOf(preset)
+            presets = listOf(preset),
+            description = description.trim(),
+            language = language.trim(),
+            style = style.trim(),
+            createdAt = if (createdAt > 0L) createdAt else System.currentTimeMillis(),
+            avatarPath = avatarPath?.takeIf { it.isNotBlank() }
         )
+    }
+
+    /**
+     * 是否存在与给定 voice_id 重复的父音色。
+     * @param excludeProfileId 编辑场景下排除音色自身（避免把自己判为冲突）。
+     */
+    fun isVoiceIdTaken(
+        voices: List<VoiceProfile>,
+        voiceId: String,
+        excludeProfileId: String? = null
+    ): Boolean {
+        val target = voiceId.trim()
+        if (target.isEmpty()) return false
+        return voices.any { it.voiceId.trim() == target && it.id != excludeProfileId }
     }
 
     fun normalizeVoice(
@@ -53,7 +80,14 @@ object VoiceLibrary {
             id = profile.id.ifBlank { UUID.randomUUID().toString() },
             displayName = profile.displayName.ifBlank { profile.voiceId },
             defaultPresetId = defaultId,
-            presets = normalizedPresets
+            presets = normalizedPresets,
+            description = profile.description.trim(),
+            language = profile.language.trim(),
+            style = profile.style.trim(),
+            // 旧数据无创建时间（0）时按“首次读取即补当前时间”的策略补齐，避免显示无意义的 0。
+            createdAt = if (profile.createdAt > 0L) profile.createdAt else System.currentTimeMillis(),
+            // 空串归一为 null；路径有效性由渲染层容错，这里不做文件存在性校验。
+            avatarPath = profile.avatarPath?.takeIf { it.isNotBlank() }
         )
     }
 
@@ -65,7 +99,9 @@ object VoiceLibrary {
             speed = normalizeSpeed(preset.speed),
             pitch = normalizePitch(preset.pitch),
             previewText = preset.previewText.ifBlank { DEFAULT_PREVIEW_TEXT },
-            description = preset.description
+            description = preset.description,
+            // 私有袋原样透传；未来若需按 provider 维度做键白名单/范围校验，可在此处加。
+            providerExtras = preset.providerExtras
         )
 
     fun upsertPreset(profile: VoiceProfile, preset: EmotionPreset, makeDefault: Boolean): VoiceProfile {
@@ -117,20 +153,27 @@ object VoiceLibrary {
             voiceId = voice.voiceId,
             emotion = preset.emotion,
             speed = preset.speed,
-            pitch = preset.pitch
+            pitch = preset.pitch,
+            providerExtras = preset.providerExtras
         )
     }
 
     fun serializeVoices(voices: List<VoiceProfile>): String =
         voices.joinToString("\n") { profile ->
             val normalized = normalizeVoice(profile)
+            // v6：顶层字段与 v5 同构（私有袋藏在预设子格式里，不占顶层位）；版本号自增以示语义变化。
             listOf(
-                "3",
+                "6",
                 encodePart(normalized.id),
                 encodePart(normalized.displayName),
                 encodePart(normalized.voiceId),
                 encodePart(normalized.defaultPresetId),
-                encodePart(serializePresets(normalized.presets))
+                encodePart(serializePresets(normalized.presets)),
+                encodePart(normalized.description),
+                encodePart(normalized.language),
+                encodePart(normalized.style),
+                encodePart(normalized.createdAt.toString()),
+                encodePart(normalized.avatarPath.orEmpty())
             ).joinToString("\t")
         }
 
@@ -154,13 +197,20 @@ object VoiceLibrary {
                             defaultSpeed = fallbackSpeed,
                             defaultPitch = fallbackPitch
                         )
-                        parts.size >= 6 && (parts[0] == "2" || parts[0] == "3") -> normalizeVoice(
+                        parts.size >= 6 && parts[0] in setOf("2", "3", "4", "5", "6") -> normalizeVoice(
                             VoiceProfile(
                                 id = decodePart(parts[1]),
                                 displayName = decodePart(parts[2]),
                                 voiceId = decodePart(parts[3]),
                                 defaultPresetId = decodePart(parts[4]),
-                                presets = deserializePresets(decodePart(parts[5]))
+                                presets = deserializePresets(decodePart(parts[5])),
+                                // v4 追加字段；v2/v3 缺失时用默认值（向后兼容，不致解析失败）。
+                                description = parts.getOrNull(6)?.let(::decodePart).orEmpty(),
+                                language = parts.getOrNull(7)?.let(::decodePart).orEmpty(),
+                                style = parts.getOrNull(8)?.let(::decodePart).orEmpty(),
+                                createdAt = parts.getOrNull(9)?.let(::decodePart)?.toLongOrNull() ?: 0L,
+                                // v5 追加字段；旧版本缺失或空串 → null（向后兼容）。
+                                avatarPath = parts.getOrNull(10)?.let(::decodePart)?.takeIf { it.isNotBlank() }
                             ),
                             fallbackEmotion,
                             fallbackSpeed,
@@ -181,7 +231,9 @@ object VoiceLibrary {
                 normalized.speed.toString(),
                 normalized.pitch.toString(),
                 normalized.previewText,
-                normalized.description
+                normalized.description,
+                // 第 8 位（index 7）：provider 私有袋，整体再 Base64 一次避免内部分隔符与外层逗号冲突。
+                encodeProviderExtras(normalized.providerExtras)
             ).joinToString(",") { encodePart(it) }
         }
 
@@ -199,14 +251,21 @@ object VoiceLibrary {
                         speed = decodePart(parts[3]).toFloatOrNull() ?: 1.0f,
                         pitch = decodePart(parts[4]).toIntOrNull() ?: 0,
                         previewText = decodePart(parts[5]),
-                        description = parts.getOrNull(6)?.let(::decodePart).orEmpty()
+                        description = parts.getOrNull(6)?.let(::decodePart).orEmpty(),
+                        // 第 8 位（index 7）；v6 前的旧预设无此位 → 空袋（向后兼容）。
+                        providerExtras = parts.getOrNull(7)?.let(::decodePart)?.let(::decodeProviderExtras).orEmpty()
                     )
                 }.getOrNull()
             }
             .filterNotNull()
 
     private fun normalizeEmotion(value: String?): String =
-        value?.takeIf { it in allowedEmotions } ?: "neutral"
+        when {
+            // 旧数据兼容：早期把中性存为 "neutral"（MiniMax 非法值），统一迁移为官方的 "calm"。
+            value == "neutral" -> "calm"
+            value != null && value in allowedEmotions -> value
+            else -> "calm"
+        }
 
     private fun normalizeSpeed(value: Float): Float =
         value.coerceIn(0.5f, 2.0f)
@@ -219,6 +278,27 @@ object VoiceLibrary {
 
     private fun decodePart(value: String): String =
         String(java.util.Base64.getUrlDecoder().decode(value), Charsets.UTF_8)
+
+    // 私有袋编码：每个 kv 的 key/value 各自 Base64，用 '=' 连接，条目间用 ';' 分隔。
+    // key/value 已 Base64 故不含 '='/';'，分隔安全。空袋编码为空串。
+    private fun encodeProviderExtras(extras: Map<String, String>): String =
+        extras.entries
+            .sortedBy { it.key }
+            .joinToString(";") { (k, v) -> "${encodePart(k)}=${encodePart(v)}" }
+
+    private fun decodeProviderExtras(value: String): Map<String, String> {
+        if (value.isBlank()) return emptyMap()
+        return value.split(';')
+            .filter { it.isNotBlank() }
+            .mapNotNull { entry ->
+                val idx = entry.indexOf('=')
+                if (idx <= 0) return@mapNotNull null
+                runCatching {
+                    decodePart(entry.substring(0, idx)) to decodePart(entry.substring(idx + 1))
+                }.getOrNull()
+            }
+            .toMap()
+    }
 }
 
 data class PresetDeleteResult(

@@ -9,3 +9,28 @@ captures/
 .externalNativeBuild/
 .cxx/
 local.defaults.properties
+.director-test.env
+.local-signing/
+
+# Build and local runtime artifacts
+*.apk
+*.aab
+*.idsig
+*.log
+*.tmp
+*.temp
+tmp/
+temp/
+temp-audio/
+generated-audio/
+
+# Secrets & credentials (alpha release hardening)
+.env
+.env.*
+!.env.example
+*.jks
+*.keystore
+keystore.properties
+secrets.properties
+*.pem
+*.p12

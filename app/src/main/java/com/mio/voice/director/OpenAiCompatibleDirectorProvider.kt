@@ -35,7 +35,7 @@ class OpenAiCompatibleDirectorProvider(
             .put(
                 "messages",
                 JSONArray()
-                    .put(JSONObject().put("role", "system").put("content", SYSTEM_PROMPT))
+                    .put(JSONObject().put("role", "system").put("content", request.systemPromptOverride?.takeIf { it.isNotBlank() } ?: DEFAULT_SYSTEM_PROMPT))
                     .put(JSONObject().put("role", "user").put("content", userPrompt(request)))
             )
 
@@ -51,7 +51,46 @@ class OpenAiCompatibleDirectorProvider(
         return DirectorResultValidator.parse(content)
     }
 
-    private fun userPrompt(request: DirectorRequest): String =
+    override suspend fun fetchModels(config: DirectorConfig): List<String> {
+        val apiKey = config.apiKey?.takeIf { it.isNotBlank() }
+            ?: throw DirectorProviderException("请先填写 AI API Key。")
+        val httpRequest = Request.Builder()
+            .url(modelsUrl(config))
+            .header("Authorization", "Bearer $apiKey")
+            .get()
+            .build()
+        val responseText = client.newCall(httpRequest).awaitBody()
+        return parseModelsResponse(responseText)
+    }
+
+    private fun parseModelsResponse(json: String): List<String> {
+        if (json.isBlank()) throw DirectorProviderException("模型列表响应为空。")
+        val root = JSONObject(json)
+        root.optJSONObject("error")?.let { error ->
+            throw DirectorProviderException(error.optString("message").ifBlank { "拉取模型失败。" })
+        }
+        val result = mutableListOf<String>()
+        val arrays = listOf(root.optJSONArray("data"), root.optJSONArray("models"))
+        arrays.forEach { array ->
+            if (array != null) {
+                for (i in 0 until array.length()) {
+                    when (val item = array.get(i)) {
+                        is JSONObject -> item.optString("id").takeIf { it.isNotBlank() }?.let(result::add)
+                        is String -> item.takeIf { it.isNotBlank() }?.let(result::add)
+                    }
+                }
+            }
+        }
+        if (result.isEmpty()) throw DirectorProviderException("没有解析到可用模型，请保留手动填写模型名。")
+        return result.distinct()
+    }
+
+    private fun modelsUrl(config: DirectorConfig): String {
+        val base = config.baseUrl.ifBlank { "https://api.openai.com" }.trimEnd('/')
+        return if (base.endsWith("/v1")) "$base/models" else "$base/v1/models"
+    }
+
+    internal fun userPrompt(request: DirectorRequest): String =
         buildString {
             appendLine("完整原文如下，必须只划分这段原文，不能改写、翻译、总结、补充或删减：")
             appendLine("<text>")
@@ -67,13 +106,36 @@ class OpenAiCompatibleDirectorProvider(
                 appendLine("  description: ${preset.description.ifBlank { "无" }}")
             }
             appendLine()
-            appendLine("要求：")
+            appendLine("输出格式要求：")
             appendLine("1. 只能输出 JSON 对象，结构为 {\"segments\":[{\"text\":\"连续的一段原文\",\"presetId\":\"preset_id\"}]}")
-            appendLine("2. 只能使用上面提供的 presetId。")
-            appendLine("3. segment.text 必须是原文中连续出现的文本片段，所有 text 按顺序拼接后必须与原文完全一致。")
-            appendLine("4. 连续且情绪相同的内容尽量合并；只有情绪明显变化时才切换预设。")
-            appendLine("5. 不要机械地一句一段。")
-            appendLine("6. 不输出 MiniMax emotion、speed、pitch。")
+            appendLine("2. presetId 只能从上面列出的预设中选择，禁止编造。")
+            if (request.autoPerformanceTags) {
+                appendLine("3. 每个 segment.text 必须基于原文中连续出现的片段；**除了下方允许的表演标记外**，所有 text 按出现顺序拼接、再移除全部表演标记后，必须与原文逐字完全一致（含标点、空格、换行），不得改写、翻译、总结、补充或删减任何正文字符。")
+            } else {
+                appendLine("3. 每个 segment.text 必须是原文中连续出现的片段，所有 text 按出现顺序拼接后必须与原文逐字完全一致（含标点、空格、换行），不得改写、翻译、总结、补充或删减。")
+            }
+            appendLine("4. 不输出 MiniMax 的 emotion、speed、pitch 字段。")
+            appendLine()
+            appendLine("分段原则（按情绪划分，让每段对应一种较一致的情绪/语气）：")
+            appendLine("5. 按情绪/语气的变化来分段：当原文中出现明显不同的情绪、语气或场景时，应拆成多段，每段对应一种较一致的情绪。不要把明显不同的情绪硬塞进同一段。")
+            appendLine("6. 出现下面任一“切换信号”时，应当在该处分段：")
+            appendLine("   a) 情绪/语气发生明确转折（如由平静转激动、由开心转难过）；")
+            appendLine("   b) 叙述（旁白）与人物对话之间相互切换；")
+            appendLine("   c) 不同人物的对话之间切换。")
+            appendLine("7. 同一种情绪连续的内容可以放在同一段，不必逐句切分；但也不要为了追求段数少而把不同情绪混在一段里，情绪贴合度优先于段数多少。")
+            appendLine("8. 选 presetId 时，依据每个预设的 label 与 description 来匹配该段最贴切的情绪；当一段情绪确实不明显或难以判断时，使用默认 presetId（${request.defaultPresetId}）。")
+            appendLine("9. 相邻两段如果选了相同的 presetId，应合并为一段。")
+            appendLine("10. 输出前自检：每段内部情绪应尽量统一，原文中情绪明显变化的位置应当有分段边界。")
+            if (request.autoPerformanceTags) {
+                appendLine()
+                appendLine("表演标记规则（仅本次开启了「自动表演标记」，务必严格遵守）：")
+                appendLine("11. 你可以在 segment.text 的合适位置**插入**以下两类标记，让配音更自然，但这不是必须的——不合适就不要加。")
+                appendLine("12. 允许的语气词标签（必须原样使用，区分大小写与连字符，不得自创、不得改拼写、不得增减字母）：")
+                appendLine("    " + PerformanceTags.INTERJECTIONS.joinToString(" "))
+                appendLine("13. 允许的停顿标记：<#秒数#>，秒数范围 0.01~99.99，最多两位小数，例如 <#0.5#>。停顿标记必须放在可朗读文本之间，不得两个停顿标记相邻连用。")
+                appendLine("14. 除上述两类标记外，**禁止插入任何其它括号标记或符号**；移除全部标记后必须与原文逐字一致（见第 3 条）。")
+                appendLine("15. 标记要少而精、服务于表演：仅在文本本身明确暗示该动作/停顿时才加（如出现“他笑了”“叹了口气”“沉默片刻”），情绪或动作不明确时一律不加。")
+            }
         }
 
     private fun parseChatContent(json: String): String {
@@ -141,13 +203,13 @@ class OpenAiCompatibleDirectorProvider(
         error.message?.replace(Regex("Bearer\\s+[^\\s]+", RegexOption.IGNORE_CASE), "Bearer ***")
             ?: "AI 导演网络请求失败。"
 
-    private companion object {
-        val JSON = "application/json; charset=utf-8".toMediaType()
-        const val SYSTEM_PROMPT = """
-你是 Mio Voice 的 AI 配音导演。你只负责把用户给出的连续原文按明显情绪变化划分为配音块，并为每个块选择一个提供的 presetId。
+    companion object {
+        private val JSON = "application/json; charset=utf-8".toMediaType()
+
+        /** AI 导演内置的系统提示词（角色设定）。展示 / 恢复默认时引用此常量。 */
+        const val DEFAULT_SYSTEM_PROMPT = """你是 Mio Voice 的 AI 配音导演。你只负责把用户给出的连续原文按明显情绪变化划分为配音块，并为每个块选择一个提供的 presetId。
 禁止改写、翻译、总结、补充或删减原文。禁止输出 MiniMax emotion、speed、pitch。禁止使用未提供的 presetId。
-输出必须是严格 JSON 对象，不要 Markdown，不要解释。
-"""
+输出必须是严格 JSON 对象，不要 Markdown，不要解释。"""
     }
 }
 

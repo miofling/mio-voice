@@ -15,7 +15,8 @@ data class GenerationFingerprint(
     val pitch: Int,
     val audioFormat: String,
     val extraParams: Map<String, String>,
-    val cacheVersion: Int = 1
+    // v2：引入 provider 私有袋（extraParams 现可来自预设持久化），升版以失效语义已变的旧缓存。
+    val cacheVersion: Int = 2
 ) {
     fun sha256(): String {
         val bytes = stableSerialize().toByteArray(Charsets.UTF_8)

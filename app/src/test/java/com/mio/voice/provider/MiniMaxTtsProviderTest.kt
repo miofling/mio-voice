@@ -99,6 +99,70 @@ class MiniMaxTtsProviderTest {
         }
     }
 
+    @Test
+    fun fetchesSystemVoicesViaGetVoiceEndpoint() = runTest {
+        MockWebServer().use { server ->
+            server.enqueue(
+                MockResponse().setBody(
+                    """
+                    {
+                      "system_voice": [
+                        {"voice_id": "male-qn-qingse", "voice_name": "青涩青年"},
+                        {"voice_id": "female-shaonv", "voice_name": "少女"},
+                        {"voice_id": "", "voice_name": "空ID应跳过"}
+                      ],
+                      "voice_cloning": [
+                        {"voice_id": "cloned-1", "voice_name": "克隆音色"}
+                      ],
+                      "base_resp": {"status_code": 0, "status_msg": "success"}
+                    }
+                    """.trimIndent()
+                )
+            )
+
+            val provider = MiniMaxTtsProvider()
+            val voices = provider.fetchSystemVoices(
+                ProviderConfig(baseUrl = server.url("/").toString(), apiKey = "test-key")
+            )
+            val recorded = server.takeRequest()
+            val body = JSONObject(recorded.body.readUtf8())
+
+            assertEquals("/v1/get_voice", recorded.path)
+            assertEquals("POST", recorded.method)
+            assertEquals("Bearer test-key", recorded.getHeader("Authorization"))
+            assertEquals("all", body.getString("voice_type"))
+            // 只取 system_voice，跳过空 voice_id，按 voice_name 排序。
+            assertEquals(
+                listOf(
+                    OfficialVoice("female-shaonv", "少女"),
+                    OfficialVoice("male-qn-qingse", "青涩青年")
+                ),
+                voices
+            )
+        }
+    }
+
+    @Test
+    fun systemVoicesBusinessErrorDoesNotLeakCredential() = runTest {
+        MockWebServer().use { server ->
+            server.enqueue(
+                MockResponse().setBody(
+                    """{"base_resp": {"status_code": 1004, "status_msg": "invalid api key"}}"""
+                )
+            )
+
+            val provider = MiniMaxTtsProvider()
+            val error = runCatching {
+                provider.fetchSystemVoices(
+                    ProviderConfig(baseUrl = server.url("/").toString(), apiKey = "test-key")
+                )
+            }.exceptionOrNull()
+
+            assertTrue(error is MiniMaxTtsException)
+            assertTrue(!error?.message.orEmpty().contains("test-key"))
+        }
+    }
+
     private fun request(baseUrl: String) = TtsRequest(
         providerProfileId = "minimax",
         config = ProviderConfig(
