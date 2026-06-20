@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="./logo/mio-voice.png" width="120" alt="Mio Voice Logo">
+<img src="./logo/logo2.png" width="360" alt="Mio Voice Logo">
 
 # Mio Voice
 
