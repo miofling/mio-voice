@@ -1,9 +1,30 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
     id("org.jetbrains.kotlin.kapt")
 }
+
+val releaseSigningPropertiesFile = rootProject.file("keystore.properties")
+val releaseSigningProperties = Properties()
+val hasReleaseSigningProperties = releaseSigningPropertiesFile.isFile
+
+if (hasReleaseSigningProperties) {
+    releaseSigningPropertiesFile.inputStream().use(releaseSigningProperties::load)
+} else {
+    logger.warn(
+        "Release signing is not configured: keystore.properties is missing. " +
+            "assembleRelease will produce an unsigned APK."
+    )
+}
+
+fun releaseSigningProperty(name: String): String =
+    releaseSigningProperties.getProperty(name)?.trim()?.takeIf { it.isNotEmpty() }
+        ?: throw GradleException(
+            "Release signing is incomplete: '$name' is missing from keystore.properties."
+        )
 
 android {
     namespace = "com.mio.voice"
@@ -18,8 +39,29 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    signingConfigs {
+        if (hasReleaseSigningProperties) {
+            create("release") {
+                val configuredStoreFile = rootProject.file(releaseSigningProperty("storeFile"))
+                if (!configuredStoreFile.isFile) {
+                    throw GradleException(
+                        "Release signing keystore does not exist: ${configuredStoreFile.path}"
+                    )
+                }
+
+                storeFile = configuredStoreFile
+                storePassword = releaseSigningProperty("storePassword")
+                keyAlias = releaseSigningProperty("keyAlias")
+                keyPassword = releaseSigningProperty("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
+            if (hasReleaseSigningProperties) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
