@@ -15,6 +15,11 @@ object NavBackStack {
     const val SCREEN_SETTINGS_AI = "settings_ai"
     const val SCREEN_SETTINGS_PROMPT = "settings_prompt"
 
+    // 关于页面及其本地子页（开源许可证 / 隐私说明）。无参数，路由即页面类型。
+    const val SCREEN_ABOUT = "about"
+    const val SCREEN_ABOUT_LICENSE = "about_license"
+    const val SCREEN_ABOUT_PRIVACY = "about_privacy"
+
     // 音色库三级结构：音色详情（音色子页）/ 新增预设占位页 / 编辑预设占位页。
     // voiceProfileId 与 presetId 均为不含 '/' 的 UUID，可安全拼进路由字符串。
     const val SCREEN_VOICE_DETAIL = "voice_detail"
@@ -38,6 +43,12 @@ object NavBackStack {
     fun settingsAiRoute(): String = SCREEN_SETTINGS_AI
 
     fun settingsPromptRoute(): String = SCREEN_SETTINGS_PROMPT
+
+    fun aboutRoute(): String = SCREEN_ABOUT
+
+    fun aboutLicenseRoute(): String = SCREEN_ABOUT_LICENSE
+
+    fun aboutPrivacyRoute(): String = SCREEN_ABOUT_PRIVACY
 
     fun voiceDetailRoute(voiceProfileId: String): String = "$SCREEN_VOICE_DETAIL/$voiceProfileId"
 

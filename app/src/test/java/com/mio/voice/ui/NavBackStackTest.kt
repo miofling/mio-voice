@@ -99,6 +99,68 @@ class NavBackStackTest {
         assertNull(NavBackStack.currentScreen(stack)) // 回到主页面（底部导航“设置”仍选中）
     }
 
+    @Test
+    fun aboutRouteResolvesToAboutScreen() {
+        val stack = listOf(NavBackStack.aboutRoute())
+        assertEquals(NavBackStack.SCREEN_ABOUT, NavBackStack.currentScreen(stack))
+        assertNull(NavBackStack.currentDetailGroupId(stack))
+    }
+
+    @Test
+    fun aboutLicenseRouteResolvesToLicenseScreen() {
+        val stack = listOf(NavBackStack.aboutLicenseRoute())
+        assertEquals(NavBackStack.SCREEN_ABOUT_LICENSE, NavBackStack.currentScreen(stack))
+    }
+
+    @Test
+    fun aboutPrivacyRouteResolvesToPrivacyScreen() {
+        val stack = listOf(NavBackStack.aboutPrivacyRoute())
+        assertEquals(NavBackStack.SCREEN_ABOUT_PRIVACY, NavBackStack.currentScreen(stack))
+    }
+
+    // 设置主页 → 关于页 → 返回 → 设置主页（不退出 App）
+    @Test
+    fun aboutSubPageBackReturnsToMainScreen() {
+        var stack = listOf(NavBackStack.aboutRoute())
+        val result = NavBackStack.pop(stack)
+        stack = result.stack
+        assertTrue(result.handled)
+        assertNull(NavBackStack.currentScreen(stack))
+    }
+
+    // 关于页 → 开源许可证 → 返回 → 关于页（逐级返回，不退出 App）
+    @Test
+    fun aboutToLicenseBacksOutToAbout() {
+        var stack = listOf(
+            NavBackStack.aboutRoute(),
+            NavBackStack.aboutLicenseRoute()
+        )
+        // 许可证 → 关于
+        var result = NavBackStack.pop(stack)
+        stack = result.stack
+        assertTrue(result.handled)
+        assertEquals(NavBackStack.SCREEN_ABOUT, NavBackStack.currentScreen(stack))
+
+        // 关于 → 主页面
+        result = NavBackStack.pop(stack)
+        stack = result.stack
+        assertTrue(result.handled)
+        assertNull(NavBackStack.currentScreen(stack))
+    }
+
+    // 关于页 → 隐私说明 → 返回 → 关于页（逐级返回，不退出 App）
+    @Test
+    fun aboutToPrivacyBacksOutToAbout() {
+        var stack = listOf(
+            NavBackStack.aboutRoute(),
+            NavBackStack.aboutPrivacyRoute()
+        )
+        val result = NavBackStack.pop(stack)
+        stack = result.stack
+        assertTrue(result.handled)
+        assertEquals(NavBackStack.SCREEN_ABOUT, NavBackStack.currentScreen(stack))
+    }
+
     // 已在主页面（空栈）时返回键不被处理，交回系统默认逻辑退出 App。
     @Test
     fun popOnMainScreenIsNotHandled() {

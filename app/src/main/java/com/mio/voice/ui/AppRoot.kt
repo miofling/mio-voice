@@ -79,6 +79,11 @@ import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Headset
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Code
+import androidx.compose.material.icons.filled.BugReport
+import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.PrivacyTip
 import androidx.compose.material.icons.filled.LibraryMusic
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Mood
@@ -163,6 +168,7 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
@@ -173,6 +179,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.mio.voice.BuildConfig
 import com.mio.voice.R
 import com.mio.voice.data.EmotionPreset
 import com.mio.voice.director.OpenAiCompatibleDirectorProvider
@@ -233,6 +240,9 @@ private const val SCREEN_PRESET_NEW = NavBackStack.SCREEN_PRESET_NEW
 private const val SCREEN_PRESET_EDIT = NavBackStack.SCREEN_PRESET_EDIT
 private const val SCREEN_COLLECTION_DETAIL = NavBackStack.SCREEN_COLLECTION_DETAIL
 private const val SCREEN_COLLECTION_PICKER = NavBackStack.SCREEN_COLLECTION_PICKER
+private const val SCREEN_ABOUT = NavBackStack.SCREEN_ABOUT
+private const val SCREEN_ABOUT_LICENSE = NavBackStack.SCREEN_ABOUT_LICENSE
+private const val SCREEN_ABOUT_PRIVACY = NavBackStack.SCREEN_ABOUT_PRIVACY
 
 @Composable
 fun AppRoot(viewModel: AppViewModel) {
@@ -401,6 +411,13 @@ fun AppRoot(viewModel: AppViewModel) {
                     viewModel = viewModel,
                     onBack = { popBackStack() }
                 )
+                SCREEN_ABOUT -> AboutScreen(
+                    onBack = { popBackStack() },
+                    onOpenLicense = { backStack.add(NavBackStack.aboutLicenseRoute()) },
+                    onOpenPrivacy = { backStack.add(NavBackStack.aboutPrivacyRoute()) }
+                )
+                SCREEN_ABOUT_LICENSE -> AboutLicenseScreen(onBack = { popBackStack() })
+                SCREEN_ABOUT_PRIVACY -> AboutPrivacyScreen(onBack = { popBackStack() })
                 else -> Scaffold(
                     topBar = {
                         MioTopBar(
@@ -444,7 +461,8 @@ fun AppRoot(viewModel: AppViewModel) {
                             else -> SettingsScreen(
                                 onOpenTts = { backStack.add(NavBackStack.settingsTtsRoute()) },
                                 onOpenAi = { backStack.add(NavBackStack.settingsAiRoute()) },
-                                onOpenPrompt = { backStack.add(NavBackStack.settingsPromptRoute()) }
+                                onOpenPrompt = { backStack.add(NavBackStack.settingsPromptRoute()) },
+                                onOpenAbout = { backStack.add(NavBackStack.aboutRoute()) }
                             )
                         }
                     }
@@ -1295,7 +1313,8 @@ private fun DirectorPreview(state: AppUiState, viewModel: AppViewModel) {
 private fun SettingsScreen(
     onOpenTts: () -> Unit,
     onOpenAi: () -> Unit,
-    onOpenPrompt: () -> Unit
+    onOpenPrompt: () -> Unit,
+    onOpenAbout: () -> Unit
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         SettingsEntryRow(
@@ -1315,6 +1334,12 @@ private fun SettingsScreen(
             title = "提示词配置",
             subtitle = "查看并编辑 AI 导演的系统提示词",
             onClick = onOpenPrompt
+        )
+        SettingsEntryRow(
+            icon = Icons.Default.Info,
+            title = "关于 Mio Voice",
+            subtitle = "版本信息、开源许可与项目反馈",
+            onClick = onOpenAbout
         )
     }
 }
@@ -3661,6 +3686,191 @@ private fun BackTopBar(
             modifier = Modifier.weight(1f)
         )
         actions()
+    }
+}
+
+// ----------------------------------------------------------------------------
+// 关于 Mio Voice
+// ----------------------------------------------------------------------------
+
+/** 关于 Mio Voice 主页：顶部信息区（留白）+ 功能入口分组卡片 + 页脚弱辅助文字。 */
+@Composable
+private fun AboutScreen(
+    onBack: () -> Unit,
+    onOpenLicense: () -> Unit,
+    onOpenPrivacy: () -> Unit
+) {
+    BackHandler(onBack = onBack)
+    val uriHandler = LocalUriHandler.current
+
+    // 打开外部链接：失败（无浏览器 / 无法处理）时静默忽略，绝不让 App 崩溃。
+    fun openUrl(url: String) {
+        runCatching { uriHandler.openUri(url) }
+    }
+
+    Column(modifier = Modifier.fillMaxSize()) {
+        BackTopBar(title = "关于 Mio Voice", onBack = onBack)
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .navigationBarsPadding()
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(20.dp)
+        ) {
+            // 顶部信息区：不套大卡片，靠留白呈现 App 图标 / 名称 / 版本 / 一句话介绍。
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Spacer(Modifier.height(8.dp))
+                Image(
+                    painter = painterResource(R.mipmap.ic_launcher),
+                    contentDescription = "Mio Voice 应用图标",
+                    modifier = Modifier
+                        .size(88.dp)
+                        .clip(RoundedCornerShape(20.dp))
+                )
+                Text(
+                    "Mio Voice",
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    "版本 ${AboutInfo.formatVersionName(BuildConfig.VERSION_NAME)}",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    "一个支持音色管理、情绪预设与 AI 辅助分析的 Android TTS 客户端。",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 12.dp)
+                )
+                Spacer(Modifier.height(4.dp))
+            }
+
+            // 功能入口：复用设置页同款圆角卡片行。
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                SettingsEntryRow(
+                    icon = Icons.Default.Code,
+                    title = "GitHub 项目主页",
+                    subtitle = "查看源代码、更新与项目说明",
+                    onClick = { openUrl(AboutInfo.GITHUB_URL) }
+                )
+                SettingsEntryRow(
+                    icon = Icons.Default.BugReport,
+                    title = "反馈问题与建议",
+                    subtitle = "前往 GitHub Issues 提交反馈",
+                    onClick = { openUrl(AboutInfo.ISSUES_URL) }
+                )
+                SettingsEntryRow(
+                    icon = Icons.Default.Description,
+                    title = "开源许可证",
+                    subtitle = "本项目使用 MIT License",
+                    onClick = onOpenLicense
+                )
+                SettingsEntryRow(
+                    icon = Icons.Default.PrivacyTip,
+                    title = "隐私说明",
+                    subtitle = "了解配置、文本与音频数据的处理方式",
+                    onClick = onOpenPrivacy
+                )
+            }
+
+            // 页脚：弱辅助文字。
+            Spacer(Modifier.height(4.dp))
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Text(
+                    "Mio Voice · Open Source",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                )
+                Text(
+                    "Made with Kotlin & Jetpack Compose",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                )
+            }
+            Spacer(Modifier.height(16.dp))
+        }
+    }
+}
+
+/** 开源许可证本地页面：离线展示项目根目录 LICENSE 的 MIT License 全文。 */
+@Composable
+private fun AboutLicenseScreen(onBack: () -> Unit) {
+    BackHandler(onBack = onBack)
+    Column(modifier = Modifier.fillMaxSize()) {
+        BackTopBar(title = "开源许可证", onBack = onBack)
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .navigationBarsPadding()
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Card(
+                shape = RoundedCornerShape(MioStyle.CardRadius),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+                elevation = CardDefaults.cardElevation(defaultElevation = MioStyle.CardShadow),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    AboutInfo.LICENSE_TEXT,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.padding(16.dp)
+                )
+            }
+            Spacer(Modifier.height(16.dp))
+        }
+    }
+}
+
+/** 隐私说明本地页面：与当前实现一致的、自然易懂的数据处理说明。 */
+@Composable
+private fun AboutPrivacyScreen(onBack: () -> Unit) {
+    BackHandler(onBack = onBack)
+    Column(modifier = Modifier.fillMaxSize()) {
+        BackTopBar(title = "隐私说明", onBack = onBack)
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .navigationBarsPadding()
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            AboutInfo.PRIVACY_PARAGRAPHS.forEach { paragraph ->
+                AboutPrivacyParagraph(paragraph)
+            }
+            Spacer(Modifier.height(16.dp))
+        }
+    }
+}
+
+/** 隐私说明段落：与设置页一致的圆角卡片承载单条说明。 */
+@Composable
+private fun AboutPrivacyParagraph(text: String) {
+    Card(
+        shape = RoundedCornerShape(MioStyle.CardRadius),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+        elevation = CardDefaults.cardElevation(defaultElevation = MioStyle.CardShadow),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Text(
+            text,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.padding(16.dp)
+        )
     }
 }
 
