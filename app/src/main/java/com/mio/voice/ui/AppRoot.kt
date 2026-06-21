@@ -235,6 +235,7 @@ private const val SCREEN_SETTINGS_AI = NavBackStack.SCREEN_SETTINGS_AI
 private const val SCREEN_SETTINGS_PROMPT = NavBackStack.SCREEN_SETTINGS_PROMPT
 private const val SCREEN_VOICE_DETAIL = NavBackStack.SCREEN_VOICE_DETAIL
 private const val SCREEN_VOICE_NEW = NavBackStack.SCREEN_VOICE_NEW
+private const val SCREEN_VOICE_CLONE = NavBackStack.SCREEN_VOICE_CLONE
 private const val SCREEN_VOICE_EDIT = NavBackStack.SCREEN_VOICE_EDIT
 private const val SCREEN_PRESET_NEW = NavBackStack.SCREEN_PRESET_NEW
 private const val SCREEN_PRESET_EDIT = NavBackStack.SCREEN_PRESET_EDIT
@@ -272,6 +273,7 @@ fun AppRoot(viewModel: AppViewModel) {
     fun openDetail(groupId: String) = backStack.add(NavBackStack.detailRoute(groupId))
     fun openVoiceDetail(voiceProfileId: String) = backStack.add(NavBackStack.voiceDetailRoute(voiceProfileId))
     fun openVoiceNew() = backStack.add(NavBackStack.voiceNewRoute())
+    fun openVoiceClone() = backStack.add(NavBackStack.voiceCloneRoute())
     fun openVoiceEdit(voiceProfileId: String) = backStack.add(NavBackStack.voiceEditRoute(voiceProfileId))
     fun openPresetNew(voiceProfileId: String) = backStack.add(NavBackStack.presetNewRoute(voiceProfileId))
     fun openPresetEdit(voiceProfileId: String, presetId: String) =
@@ -377,6 +379,11 @@ fun AppRoot(viewModel: AppViewModel) {
                     viewModel = viewModel,
                     onBack = { popBackStack() }
                 )
+                SCREEN_VOICE_CLONE -> VoiceCloneScreen(
+                    state = state,
+                    viewModel = viewModel,
+                    onBack = { popBackStack() }
+                )
                 SCREEN_VOICE_EDIT -> VoiceProfileEditorScreen(
                     voiceProfileId = currentVoiceProfileId,
                     state = state,
@@ -451,7 +458,8 @@ fun AppRoot(viewModel: AppViewModel) {
                                 viewModel = viewModel,
                                 onOpenVoice = { openVoiceDetail(it) },
                                 onAddVoice = { openVoiceNew() },
-                                onAddOfficial = { viewModel.fetchOfficialVoices() }
+                                onAddOfficial = { viewModel.fetchOfficialVoices() },
+                                onCloneVoice = { openVoiceClone() }
                             )
                             "library" -> AudioLibraryScreen(
                                 state = state,
@@ -1778,7 +1786,8 @@ private fun VoiceLibraryScreen(
     viewModel: AppViewModel,
     onOpenVoice: (String) -> Unit,
     onAddVoice: () -> Unit,
-    onAddOfficial: () -> Unit
+    onAddOfficial: () -> Unit,
+    onCloneVoice: () -> Unit
 ) {
     if (state.showOfficialVoicePicker) {
         OfficialVoicePickerDialog(
@@ -1807,6 +1816,11 @@ private fun VoiceLibraryScreen(
                         Spacer(Modifier.width(4.dp))
                         Text("官方音色")
                     }
+                }
+                TextButton(onClick = onCloneVoice) {
+                    Icon(Icons.Default.GraphicEq, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("克隆")
                 }
                 IconButton(onClick = onAddVoice) {
                     Icon(Icons.Default.Add, contentDescription = "新增音色", tint = MaterialTheme.colorScheme.primary)
@@ -2939,6 +2953,167 @@ private fun VoiceProfileEditorScreen(
             Spacer(Modifier.height(24.dp))
         }
     }
+}
+
+// ----------------------------------------------------------------------------
+// 音色克隆页（选择本地音频样本 → 上传并克隆为自定义音色）
+// ----------------------------------------------------------------------------
+
+@Composable
+private fun VoiceCloneScreen(
+    state: AppUiState,
+    viewModel: AppViewModel,
+    onBack: () -> Unit
+) {
+    BackHandler(onBack = onBack)
+    val context = LocalContext.current
+
+    var name by rememberSaveable { mutableStateOf("") }
+    var vid by rememberSaveable { mutableStateOf("") }
+    var demoText by rememberSaveable { mutableStateOf(VoiceLibrary.DEFAULT_PREVIEW_TEXT) }
+    var description by rememberSaveable { mutableStateOf("") }
+    var language by rememberSaveable { mutableStateOf("") }
+    var style by rememberSaveable { mutableStateOf("") }
+    var sampleUri by rememberSaveable { mutableStateOf<String?>(null) }
+    var sampleName by rememberSaveable { mutableStateOf<String?>(null) }
+
+    val picker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri ->
+        if (uri != null) {
+            sampleUri = uri.toString()
+            sampleName = queryDisplayName(context, uri) ?: uri.lastPathSegment?.substringAfterLast('/')
+        }
+    }
+
+    val cloning = state.isCloningVoice
+
+    Column(modifier = Modifier.fillMaxSize()) {
+        BackTopBar(title = "克隆音色", onBack = onBack)
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .navigationBarsPadding()
+                .imePadding()
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            Text(
+                "上传一段清晰的人声音频作为样本，克隆出专属音色。克隆音色在首次合成时可能产生费用。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            OutlinedTextField(
+                value = name,
+                onValueChange = { name = it.take(VoiceFormLimits.MAX_VOICE_NAME_LENGTH) },
+                label = { Text("音色名称") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
+            )
+
+            OutlinedTextField(
+                value = vid,
+                onValueChange = { vid = it.take(VoiceFormLimits.MAX_VOICE_ID_LENGTH) },
+                label = { Text("voice_id") },
+                singleLine = true,
+                supportingText = { Text("至少 8 位，需同时含字母和数字，且首字符为字母") },
+                trailingIcon = {
+                    TextButton(onClick = { vid = randomCloneVoiceId() }) { Text("生成") }
+                },
+                modifier = Modifier.fillMaxWidth()
+            )
+
+            // 音频样本选择区。
+            OutlinedButton(
+                onClick = { picker.launch("audio/*") },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(Icons.Default.GraphicEq, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text(if (sampleName != null) "重新选择音频样本" else "选择音频样本")
+            }
+            sampleName?.let {
+                Text(
+                    "已选择：$it",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            OutlinedTextField(
+                value = demoText,
+                onValueChange = { demoText = it.take(VoiceFormLimits.MAX_PREVIEW_TEXT_LENGTH) },
+                label = { Text("试听文本（可选）") },
+                minLines = 2,
+                modifier = Modifier.fillMaxWidth()
+            )
+            OutlinedTextField(
+                value = description,
+                onValueChange = { description = it.take(VoiceFormLimits.MAX_DESCRIPTION_LENGTH) },
+                label = { Text("音色描述（可选）") },
+                minLines = 2,
+                modifier = Modifier.fillMaxWidth()
+            )
+            OutlinedTextField(
+                value = language,
+                onValueChange = { language = it.take(VoiceFormLimits.MAX_SHORT_FIELD_LENGTH) },
+                label = { Text("语言（可选）") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
+            )
+            OutlinedTextField(
+                value = style,
+                onValueChange = { style = it.take(VoiceFormLimits.MAX_SHORT_FIELD_LENGTH) },
+                label = { Text("风格（可选）") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
+            )
+
+            Button(
+                onClick = {
+                    if (cloning) return@Button
+                    viewModel.cloneVoice(
+                        displayName = name,
+                        voiceId = vid,
+                        sampleUri = sampleUri,
+                        demoText = demoText,
+                        description = description,
+                        language = language,
+                        style = style
+                    ) { success ->
+                        if (success) onBack()
+                    }
+                },
+                enabled = !cloning,
+                modifier = Modifier.fillMaxWidth().height(MioStyle.PrimaryButtonHeight),
+                shape = RoundedCornerShape(MioStyle.PrimaryButtonRadius)
+            ) {
+                if (cloning) {
+                    CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary)
+                } else {
+                    Text("开始克隆")
+                }
+            }
+            Spacer(Modifier.height(24.dp))
+        }
+    }
+}
+
+/** 从 content Uri 查询展示文件名；失败返回 null。 */
+private fun queryDisplayName(context: android.content.Context, uri: Uri): String? =
+    runCatching {
+        context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+            val idx = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+            if (idx >= 0 && cursor.moveToFirst()) cursor.getString(idx) else null
+        }
+    }.getOrNull()?.takeIf { it.isNotBlank() }
+
+/** 生成一个符合 MiniMax 规则的随机 voice_id（首字母 + 字母数字混合，≥8 位）。 */
+private fun randomCloneVoiceId(): String {
+    val suffix = (10000000..99999999).random()
+    return "Voice$suffix"
 }
 
 // ----------------------------------------------------------------------------

@@ -42,6 +42,7 @@ import com.mio.voice.playback.PlaybackState
 import com.mio.voice.playback.PlayerController
 import com.mio.voice.provider.FakeTtsProvider
 import com.mio.voice.provider.MiniMaxTtsProvider
+import com.mio.voice.provider.MiniMaxVoiceCloneProvider
 import com.mio.voice.export.AudioExporter
 import com.mio.voice.provider.OfficialVoice
 import com.mio.voice.provider.OfficialVoiceClassifier
@@ -167,6 +168,9 @@ data class AppUiState(
     val officialVoices: List<OfficialVoice> = emptyList(),
     val isFetchingOfficialVoices: Boolean = false,
     val showOfficialVoicePicker: Boolean = false,
+    // 音色克隆：上传样本并克隆为自定义音色
+    val isCloningVoice: Boolean = false,
+    val voiceCloneDemoUrl: String? = null,
     // 导出语音：一次性事件，UI 观察到后拉起系统「保存到...」文件选择器，处理完置 null。
     val pendingExport: PendingExport? = null
 )
@@ -193,6 +197,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val playerController = PlayerController(application)
     private val fakeProvider = FakeTtsProvider()
     private val miniMaxProvider = MiniMaxTtsProvider()
+    private val voiceCloneProvider = MiniMaxVoiceCloneProvider()
     private val directorProvider = OpenAiCompatibleDirectorProvider()
     private var generationJob: Job? = null
     private var previewJob: Job? = null
@@ -1823,6 +1828,137 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * 音色克隆：上传本地音频样本 → 调用 MiniMax voice_clone → 成功后入库音色库。
+     * 复用 TTS 的 API Key 与 baseUrl。校验通过并克隆成功回调 onResult(true)，否则提示并 onResult(false)。
+     *
+     * @param sampleUri 本次选择的本地音频文件 content Uri 字符串。
+     * @param demoText 试听文本；非空时一并请求 demo 试听音频（首次合成可能产生费用）。
+     */
+    fun cloneVoice(
+        displayName: String,
+        voiceId: String,
+        sampleUri: String?,
+        demoText: String?,
+        description: String,
+        language: String,
+        style: String,
+        onResult: (Boolean) -> Unit
+    ) {
+        viewModelScope.launch {
+            val name = displayName.trim()
+            val vid = voiceId.trim()
+            val state = _uiState.value
+            when {
+                name.isEmpty() -> {
+                    _uiState.update { it.copy(statusMessage = "请填写音色名称。") }
+                    onResult(false); return@launch
+                }
+                name.length > MAX_VOICE_NAME_LENGTH -> {
+                    _uiState.update { it.copy(statusMessage = "音色名称过长（最多 $MAX_VOICE_NAME_LENGTH 字）。") }
+                    onResult(false); return@launch
+                }
+                vid.isEmpty() -> {
+                    _uiState.update { it.copy(statusMessage = "请填写 voice_id。") }
+                    onResult(false); return@launch
+                }
+                !isValidCloneVoiceId(vid) -> {
+                    _uiState.update { it.copy(statusMessage = "voice_id 需至少 8 位、同时包含字母和数字、且首字符为字母。") }
+                    onResult(false); return@launch
+                }
+                VoiceLibrary.isVoiceIdTaken(state.settings.voices, vid) -> {
+                    _uiState.update { it.copy(statusMessage = "voice_id 已存在，请使用其它值。") }
+                    onResult(false); return@launch
+                }
+                sampleUri.isNullOrBlank() -> {
+                    _uiState.update { it.copy(statusMessage = "请先选择音频样本文件。") }
+                    onResult(false); return@launch
+                }
+            }
+
+            val apiKey = state.apiKeyInput.takeIf { it.isNotBlank() } ?: readApiKeyOrNull()
+            if (apiKey.isNullOrBlank()) {
+                _uiState.update { it.copy(statusMessage = "请先在设置里填写 API Key。") }
+                onResult(false); return@launch
+            }
+            val config = state.settings.providerConfig(apiKey)
+            val desc = description.trim().take(MAX_DESCRIPTION_LENGTH)
+            val lang = language.trim().take(MAX_SHORT_FIELD_LENGTH)
+            val sty = style.trim().take(MAX_SHORT_FIELD_LENGTH)
+
+            _uiState.update { it.copy(isCloningVoice = true, voiceCloneDemoUrl = null, statusMessage = "正在上传样本并克隆音色...") }
+            try {
+                val app = getApplication<Application>()
+                val uri = Uri.parse(sampleUri)
+                val fileName = resolveDisplayName(uri)
+                val bytes = withContext(Dispatchers.IO) {
+                    app.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                        ?: throw IllegalStateException("无法读取所选音频文件。")
+                }
+                if (bytes.size > MAX_CLONE_SAMPLE_BYTES) {
+                    _uiState.update { it.copy(isCloningVoice = false, statusMessage = "音频文件过大（上限约 ${MAX_CLONE_SAMPLE_BYTES / (1024 * 1024)}MB）。") }
+                    onResult(false); return@launch
+                }
+
+                val fileId = voiceCloneProvider.uploadSample(config, bytes, fileName)
+                val result = voiceCloneProvider.cloneVoice(
+                    config = config,
+                    fileId = fileId,
+                    voiceId = vid,
+                    demoText = demoText?.trim()?.takeIf { it.isNotBlank() },
+                    model = state.modelInput.ifBlank { state.settings.model }
+                )
+
+                settingsStore.upsertVoice(
+                    VoiceLibrary.createVoice(
+                        displayName = name,
+                        voiceId = result.voiceId,
+                        description = desc,
+                        language = lang,
+                        style = sty
+                    ),
+                    makeDefault = false
+                )
+                _uiState.update {
+                    it.copy(
+                        isCloningVoice = false,
+                        voiceCloneDemoUrl = result.demoAudioUrl,
+                        statusMessage = "音色克隆成功，已加入音色库。" +
+                            if (result.demoAudioUrl != null) "（已生成试听）" else ""
+                    )
+                }
+                onResult(true)
+            } catch (error: Exception) {
+                _uiState.update { it.copy(isCloningVoice = false, statusMessage = sanitize(error)) }
+                onResult(false)
+            }
+        }
+    }
+
+    /** 从 content Uri 查询展示用文件名；失败时回退到 Uri 末段，再退到默认名。 */
+    private fun resolveDisplayName(uri: Uri): String {
+        val app = getApplication<Application>()
+        val queried = runCatching {
+            app.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                val idx = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                if (idx >= 0 && cursor.moveToFirst()) cursor.getString(idx) else null
+            }
+        }.getOrNull()
+        val name = queried?.takeIf { it.isNotBlank() }
+            ?: uri.lastPathSegment?.substringAfterLast('/')?.takeIf { it.isNotBlank() }
+            ?: "sample.mp3"
+        // 确保带扩展名，便于服务端识别格式。
+        return if (name.contains('.')) name else "$name.mp3"
+    }
+
+    /** voice_id 软校验：至少 8 位、同时含字母和数字、首字符为字母。 */
+    private fun isValidCloneVoiceId(value: String): Boolean =
+        value.length >= 8 &&
+            value.first().isLetter() &&
+            value.any { it.isLetter() } &&
+            value.any { it.isDigit() } &&
+            value.all { it.isLetterOrDigit() }
+
     fun fetchDirectorModels(
         baseUrl: String? = null,
         endpointPath: String? = null
@@ -2187,6 +2323,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     private companion object {
         const val TEXT_TASK_ID = "plain-text-full"
+
+        // 音色克隆样本大小软上限（约 20MB），超过即在本地拦截，避免无谓上传。
+        const val MAX_CLONE_SAMPLE_BYTES = 20L * 1024 * 1024
 
         const val MAX_VOICE_NAME_LENGTH = VoiceFormLimits.MAX_VOICE_NAME_LENGTH
         const val MAX_VOICE_ID_LENGTH = VoiceFormLimits.MAX_VOICE_ID_LENGTH

@@ -24,6 +24,7 @@ object NavBackStack {
     // voiceProfileId 与 presetId 均为不含 '/' 的 UUID，可安全拼进路由字符串。
     const val SCREEN_VOICE_DETAIL = "voice_detail"
     const val SCREEN_VOICE_NEW = "voice_new"
+    const val SCREEN_VOICE_CLONE = "voice_clone"
     const val SCREEN_VOICE_EDIT = "voice_edit"
     const val SCREEN_PRESET_NEW = "preset_new"
     const val SCREEN_PRESET_EDIT = "preset_edit"
@@ -53,6 +54,8 @@ object NavBackStack {
     fun voiceDetailRoute(voiceProfileId: String): String = "$SCREEN_VOICE_DETAIL/$voiceProfileId"
 
     fun voiceNewRoute(): String = SCREEN_VOICE_NEW
+
+    fun voiceCloneRoute(): String = SCREEN_VOICE_CLONE
 
     fun voiceEditRoute(voiceProfileId: String): String = "$SCREEN_VOICE_EDIT/$voiceProfileId"
 
