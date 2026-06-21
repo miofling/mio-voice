@@ -17,6 +17,7 @@ local.defaults.properties
 *.aab
 *.idsig
 *.log
+release-artifacts/
 *.tmp
 *.temp
 tmp/

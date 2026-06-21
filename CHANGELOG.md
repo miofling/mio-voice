@@ -9,13 +9,17 @@
 
 ### 新增
 
-- MiniMax 音色克隆：选择本地音频样本上传并克隆为自定义音色，克隆成功后自动加入音色库
-
 ### 变更
 
 ### 修复
 
-## [0.1.0] - 2025-06-21
+## [0.2.0-alpha] - 2026-06-21
+
+### 新增
+
+- MiniMax 音色克隆：选择本地音频样本上传并克隆为自定义音色，克隆成功后自动加入音色库
+
+## [0.1.0-alpha] - 2025-06-21
 
 首个公开 Alpha 版本。
 
@@ -33,5 +37,6 @@
 - 关于与隐私页面
 - Release 签名配置
 
-[未发布]: https://github.com/miofling/mio-voice/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/miofling/mio-voice/releases/tag/v0.1.0
+[未发布]: https://github.com/miofling/mio-voice/compare/v0.2.0-alpha...HEAD
+[0.2.0-alpha]: https://github.com/miofling/mio-voice/compare/v0.1.0-alpha...v0.2.0-alpha
+[0.1.0-alpha]: https://github.com/miofling/mio-voice/releases/tag/v0.1.0-alpha
